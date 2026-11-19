@@ -1,0 +1,15 @@
+{
+  "subscriptions": [],
+  "routing_output_dir": "steer-output",
+  "routing": {
+    "enabled": true,
+    "target": "steer",
+    "default_policy": "preserve",
+    "main": {
+      "excluded_countries": ["RU", "BY", "CN", "IR", "KP", "SY", "CU"],
+      "allowed_countries": [],
+      "min_agreement": 0.6,
+      "min_votes": 3
+    }
+  }
+}

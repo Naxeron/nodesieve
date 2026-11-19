@@ -1,0 +1,34 @@
+# Local settings: subscription links and router credentials
+/proxy_sites_config.json
+
+# Written by the checker; these hold proxy credentials
+/apply_to_router.sh
+/steer-output/
+/forkozz-output/
+/crashed_nodes.txt
+/sub_cache/
+
+# AmneziaWG profiles (private keys), read from the project directory
+/*.conf
+
+# Mihomo binary, downloaded on first run
+/mihomo
+/mihomo.exe
+
+# Local scratch: sample nodes and pre-refactoring backups
+/node.txt
+/test_node.yaml
+/test_config.yaml
+/.pre-*-backup-*.tar.gz
+
+# Agent workspaces and request logs; only the shared guidelines are tracked
+/.agents/*
+!/.agents/AGENTS.md
+/ORIGINAL_REQUEST.md
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
