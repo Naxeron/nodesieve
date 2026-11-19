@@ -135,6 +135,7 @@ proxy_sites/
     ├── dashboard.py                 # Pipeline UI and workflow coordinator
     └── routing.py                   # Steer routing menu
 ssh_router.py                        # Standalone SSH CLI helper (Paramiko-based)
+update_ipregion.py                   # Replaces the bundled ipregion.sh with the latest upstream version
 tests/                               # Test suite
 ```
 

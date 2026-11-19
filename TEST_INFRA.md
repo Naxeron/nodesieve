@@ -34,6 +34,7 @@ tests/
 │   ├── test_routing_pipeline.py        # Steer check/export/deploy boundaries
 │   ├── test_steer_export.py            # Steer artifacts; the apply script run in /bin/sh against a
 │   │                                   # stand-in for the Zapret Manager panel backend
+│   ├── test_update_ipregion.py         # ipregion.sh updater, with GitHub replaced by canned answers
 │   └── test_warp_and_router.py         # WarpScanner endpoints & baseline router script
 │
 ├── Tier 1: Unit & Component Isolation

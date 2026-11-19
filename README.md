@@ -252,6 +252,19 @@ python -m pytest --ignore=tests/test_live_router_smoke.py --deselect tests/test_
 The hardware tests log in with the SSH agent or default key files. The smoke test
 uses a password instead when `ROUTER_SSH_PASS` is set.
 
+## Updating dependencies
+
+- **ipregion.sh:** `python update_ipregion.py` replaces the bundled script with the
+  latest one from [vernette/ipregion](https://github.com/vernette/ipregion) and
+  updates the commit recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+  A version that prints another JSON report version, has no `geoip` group or has a
+  syntax error is refused, and the bundled script stays as it is. Review an update
+  with `git diff`, then commit it.
+- **Python packages** are not pinned: `pip install -U -r requirements.txt` brings
+  them up to date.
+- **Mihomo** is downloaded only while the project directory has no `mihomo` binary.
+  Delete the binary to get the current alpha build on the next check.
+
 ## Third-party software
 
 `ipregion.sh` is an unmodified copy of [ipregion](https://github.com/vernette/ipregion)
