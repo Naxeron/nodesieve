@@ -10,6 +10,7 @@ from nodesieve.parsers.base import (
 from nodesieve.parsers.mihomo import (
     node_url_to_mihomo_dict,
 )
+from nodesieve.parsers.xray import node_url_to_xray_outbound
 
 __all__ = [
     "extract_host_port",
@@ -18,4 +19,5 @@ __all__ = [
     "get_flag_emoji",
     "get_node_name",
     "node_url_to_mihomo_dict",
+    "node_url_to_xray_outbound",
 ]

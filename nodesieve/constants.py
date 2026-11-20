@@ -11,10 +11,10 @@ CONFIG_FILE = "nodesieve_config.json"
 CRASHED_LOG_FILE = "crashed_nodes.txt"
 SUB_CACHE_DIR = "sub_cache"
 
-MIHOMO_PATH = os.path.join(
-    PROJECT_ROOT,
-    "mihomo" + (".exe" if os.name == "nt" else "")
-)
+# The cores nodes are checked through, each downloaded on first use.
+XRAY_PATH = os.path.join(PROJECT_ROOT, "xray" + (".exe" if os.name == "nt" else ""))
+MIHOMO_PATH = os.path.join(PROJECT_ROOT, "mihomo" + (".exe" if os.name == "nt" else ""))
+CORES = ("xray", "mihomo")
 
 # Environment detection
 IS_TERMUX = "com.termux" in os.environ.get("PREFIX", "")
@@ -26,6 +26,9 @@ IS_ANDROID = sys.platform == "android" or hasattr(sys, "getandroidapilevel")
 # Default Application Configuration
 DEFAULT_CONFIG: Dict[str, Any] = {
     "subscriptions": [],
+    # The core nodes are checked through: "xray", which the share links are written for, or
+    # "mihomo", which the feed's Clash profile is for.
+    "core": "xray",
     "workers": "auto",
     "tcp_workers": 128,
     "allowed_countries": [],
@@ -52,8 +55,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "feed_command": "",
 }
 
-# The local Mihomo instances that check nodes get their configuration from
-# nodesieve.core.mihomo.render_batch_config.
+# The local core instances that check nodes get their configuration from
+# nodesieve.core.xray.render_xray_config or nodesieve.core.mihomo.render_batch_config.
 
 # Connectivity probe of the feed's Clash profile.
 GOOGLE_HEALTHCHECK_URL = "https://www.gstatic.com/generate_204"

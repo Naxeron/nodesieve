@@ -314,7 +314,7 @@ class TestMainLocationIntegration(unittest.IsolatedAsyncioTestCase):
         tester = NodeTester({"routing": {"enabled": True}}, real_ip="198.51.100.1")
         node = "vless://abc@192.0.2.1:443?encryption=foo#original"
         runner = MagicMock(proxy_url="http://127.0.0.1:23456", port=23456, ensure_alive=AsyncMock())
-        with patch("nodesieve.core.tester.MihomoRunner") as runner_cls, \
+        with patch("nodesieve.core.tester.CoreRunner") as runner_cls, \
                 patch("nodesieve.core.tester.aiohttp.ClientSession") as session_cls, \
                 patch("nodesieve.core.tester.aiohttp.TCPConnector") as connector_cls, \
                 patch.object(tester, "_fetch_ip", new=AsyncMock(return_value=trace)), \

@@ -35,7 +35,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## Xray
+
+The [Xray](https://github.com/XTLS/Xray-core) binary is not part of this repository.
+The checker downloads it from the project's releases on first run, when Xray is the
+core nodes are checked through, and checks it against the SHA-256 published with it.
+
 ## Mihomo
 
 The [Mihomo](https://github.com/MetaCubeX/mihomo) binary is not part of this
-repository. The checker downloads it from the project's releases on first run.
+repository. The checker downloads it from the project's releases on first run, when
+Mihomo is the core nodes are checked through.

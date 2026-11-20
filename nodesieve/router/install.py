@@ -39,7 +39,7 @@ PACKAGES = "python3 python3-aiohttp python3-yaml"
 STEER_REFRESH = "/opt/zapret-manager-luci/backend.sh steer_action sub_refresh x"
 # Hours between scheduled scans: divisors of a day, so the scans stay evenly spaced. 0: none.
 SCAN_HOURS = (0, 1, 2, 3, 4, 6, 8, 12, 24)
-# Python with the modules it pulls in, the Mihomo binary the first scan downloads, caches.
+# Python with the modules it pulls in, the core binary the first scan downloads, caches.
 MIN_FREE_MB = 150
 # Settings that describe this computer or how it reaches the router, not the router.
 _NOT_FOR_THE_ROUTER = (
@@ -183,7 +183,7 @@ def install_router(config: dict, every: int = 6, dry_run: bool = False, remove: 
         free_mb = None
     if facts.get("installed") != "yes" and free_mb is not None and free_mb < MIN_FREE_MB:
         log.error(f"[-] The router has {free_mb:.0f} MB of storage free; nodesieve needs about {MIN_FREE_MB} MB "
-                  "(Python, and the Mihomo binary the first scan downloads).")
+                  "(Python, and the Xray or Mihomo binary the first scan downloads).")
         return False
     if not facts.get("web_home"):
         log.warning("[!] The router has no web server (uhttpd), so nothing will serve its feed to the network.")

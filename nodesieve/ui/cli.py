@@ -10,7 +10,7 @@ import sys
 from typing import List, Optional
 
 from nodesieve.config import ConfigManager
-from nodesieve.constants import CRASHED_LOG_FILE, PROJECT_ROOT
+from nodesieve.constants import CORES, CRASHED_LOG_FILE, PROJECT_ROOT
 from nodesieve.feed import new_token, serve_feed, valid_token
 from nodesieve.logging import log
 from nodesieve.router.install import SCAN_HOURS, install_router
@@ -85,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="speedtest_timeout",
         type=int,
         help="Timeout in seconds for speedtesting each candidate node.",
+    )
+    parser.add_argument(
+        "--core",
+        choices=list(CORES),
+        help="The core to check nodes through, for this run: 'xray' (the default), which share links "
+             "are written for, or 'mihomo'.",
     )
     parser.add_argument(
         "--config-file",
@@ -393,6 +399,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         config["allowed_countries"] = [
             c.strip().upper() for c in args.allowed_countries.split(",") if c.strip()
         ]
+
+    if args.core is not None:
+        config["core"] = args.core
 
     if args.speedtest_timeout is not None:
         if args.speedtest_timeout <= 0:

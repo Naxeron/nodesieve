@@ -9,7 +9,7 @@ import aiohttp
 from nodesieve.config import ConfigManager
 from nodesieve.core.fetcher import NodeFetcher
 from nodesieve.core.limits import ResourceLimits
-from nodesieve.core.mihomo import MihomoManager, NodeEndpoint, run_in_batches
+from nodesieve.core.batch import NodeEndpoint, run_in_batches, setup_core
 from nodesieve.core.tester import NodeTester
 from nodesieve.feed import feed_status, run_feed_command, write_feed
 from nodesieve.logging import ErrorTracker, log, update_progress
@@ -118,11 +118,10 @@ class VPNDashboard:
         log.info(f"[*] Survived TCP ping: {tcp_survivors_count}")
         log.info(f"[*] System has {free_mem_mb:.0f}MB free memory. HTTP workers set to {self.config['workers']}.")
         num_workers = min(self.config["workers"], tcp_survivors_count)
-        per_instance, instances = ResourceLimits.mihomo_instances(num_workers)
+        per_instance, instances = ResourceLimits.core_instances(num_workers)
+        core = setup_core(self.config)
         log.info(f"[*] Starting concurrent IP checks with {num_workers} workers, through up to {instances} "
-                 f"Mihomo instances of {per_instance} nodes each...\n")
-
-        MihomoManager.setup()
+                 f"{core.display} instances of {per_instance} nodes each...\n")
 
         supported_nodes = []
         completed = 0
@@ -139,7 +138,7 @@ class VPNDashboard:
         await run_in_batches(
             list(enumerate(tcp_survivors, 1)), tester.check_links, tester.test_node_full, record,
             config=self.config, workers=num_workers, total_nodes=tcp_survivors_count,
-            temp_prefix="mihomo_", error_context="HTTP Worker",
+            temp_prefix="core_", error_context="HTTP Worker",
         )
         print()
 
@@ -157,6 +156,10 @@ class VPNDashboard:
                 f"[*] Multiplexing: {tester.mux_supported} of {tester.mux_offered} eligible working nodes support it"
                 + ("; the rest are used without it." if tester.mux_supported < tester.mux_offered else ".")
             )
+        elif (self.config.get("use_mux", True) and core.name != "mihomo"
+              and not self.config.get("routing", {}).get("enabled", False)):
+            log.info(f"[*] Multiplexing: only a scan through Mihomo can tell which nodes support it, "
+                     f"so after this {core.display} scan the Clash profile has none.")
 
         return supported_nodes, tester
 
@@ -183,7 +186,7 @@ class VPNDashboard:
 
         log.info(f"[*] Speedtesting {len(clean_node_strs)} surviving verified nodes with {speed_workers} workers...")
 
-        MihomoManager.setup()
+        setup_core(self.config)
         speedtest_timeout = self.config.get("speedtest_timeout", 30)
         speed_tested_nodes: List[Tuple[str, float, float]] = []
         completed = 0
@@ -203,7 +206,7 @@ class VPNDashboard:
         await run_in_batches(
             list(enumerate(clean_node_strs, 1)), active_tester.speedtest_links, speedtest, record,
             config=self.config, workers=speed_workers, total_nodes=active_tester.total_nodes,
-            temp_prefix="speed_mihomo_", error_context="Speed Worker",
+            temp_prefix="speed_core_", error_context="Speed Worker",
         )
         print()
 
