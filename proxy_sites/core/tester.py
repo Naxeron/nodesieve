@@ -16,8 +16,13 @@ from proxy_sites.parsers.base import (
     format_descriptive_node_name,
     get_node_name,
 )
+from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict, without_mux
 from proxy_sites.routing import main_policy_failure, normalize_routing
 from proxy_sites.location import probe_ipregion
+
+# Cloudflare's trace endpoint by address, one per IP family.
+TRACE_URL_IPV4 = "https://1.1.1.1/cdn-cgi/trace"
+TRACE_URL_IPV6 = "https://[2606:4700:4700::1111]/cdn-cgi/trace"
 
 
 class NodeTester:
@@ -38,6 +43,9 @@ class NodeTester:
         self.real_ip = real_ip
         self.ipregion_path = IPREGION_SCRIPT_PATH
         self.node_metadata: dict = {}
+        # Working nodes that were offered multiplexing, and how many of them answered through it.
+        self.mux_offered = 0
+        self.mux_supported = 0
 
         self._ipregion_semaphore = asyncio.Semaphore(6)
 
@@ -138,6 +146,23 @@ class NodeTester:
         accepted = {country.upper() for country in allowed}
         return sum(count for country, count in evidence["counts"].items() if country in accepted) / evidence["total"]
 
+    def _mux_applies(self, node: str) -> bool:
+        """Whether use_mux would give this node's Mihomo proxy multiplexing."""
+        if not self.config.get("use_mux", True):
+            return False
+        proxy = node_url_to_mihomo_dict(node, use_mux=True)
+        return bool(proxy and "smux" in proxy)
+
+    async def _answers_multiplexed(self, idx: int, node: str, trace_url: str) -> bool:
+        """Whether a working node also answers with multiplexing, which only a server that supports it does."""
+        try:
+            async with MihomoRunner(node=node, config=self.config, temp_prefix="mux_mihomo_", node_idx=idx) as runner:
+                ip, _, _ = await self._fetch_ip(trace_url, runner.proxy_url)
+                return bool(ip)
+        except Exception as e:
+            ErrorTracker.record_error("Mux Probe", e)
+            return False
+
     async def test_node_full(self, idx: int, node: str) -> Optional[Tuple[str, float, str]]:
         """Phase 1 IP check: Launches isolated Mihomo instance and verifies the node's exit IP and location."""
         original_node = node
@@ -154,6 +179,10 @@ class NodeTester:
             return None
 
         is_awg = node.startswith("awg_conf:")
+        # Multiplexing (sing-mux) works only when the server supports it, which a link does
+        # not say, and a server without it drops every connection. So the node is checked
+        # without multiplexing and keeps it only if it then answers a request through it.
+        mux_wanted = self._mux_applies(node)
 
         def drop(label: str, reason: str, **details) -> None:
             safe_print(f"[-] Node {idx}/{self.total_nodes} [{node_name}] -> Dropped ({label})")
@@ -163,7 +192,7 @@ class NodeTester:
 
         try:
             async with MihomoRunner(
-                node=node,
+                node=without_mux(node) if mux_wanted else node,
                 config=self.config,
                 temp_prefix="mihomo_",
                 node_idx=idx,
@@ -181,8 +210,8 @@ class NodeTester:
                     max_field_size=65536,
                 ) as session:
                     # Concurrently query IPv4 and IPv6 endpoints on shared session
-                    v4_task = self._fetch_ip("https://1.1.1.1/cdn-cgi/trace", proxy_url, session=session)
-                    v6_task = self._fetch_ip("https://[2606:4700:4700::1111]/cdn-cgi/trace", proxy_url, session=session)
+                    v4_task = self._fetch_ip(TRACE_URL_IPV4, proxy_url, session=session)
+                    v6_task = self._fetch_ip(TRACE_URL_IPV6, proxy_url, session=session)
 
                     results = await asyncio.gather(v4_task, v6_task)
                     ipv4_ip, ipv4_loc, v4_lat = results[0]
@@ -267,40 +296,51 @@ class NodeTester:
                     if allowed and self.config.get("enable_loc_ranking", False):
                         loc_score = await self.fetch_loc_score(base_port, allowed, eff_v4, ipv6_ip)
 
-                country_name = await GeolocationService.get_country_name(country_code)
+            # The node qualifies and its Mihomo instance is closed, so the multiplexing
+            # probe starts the worker's next instance rather than a second one. Steer
+            # connects with its own core and takes no multiplexing from this checker.
+            link = node
+            if mux_wanted and not routing_enabled:
+                self.mux_offered += 1
+                if await self._answers_multiplexed(idx, node, TRACE_URL_IPV4 if ipv4_ip else TRACE_URL_IPV6):
+                    self.mux_supported += 1
+                else:
+                    link = without_mux(node)
 
-                display_ip = []
-                if ipv4_ip:
-                    display_ip.append(ipv4_ip)
-                if ipv6_ip and ipv6_ip != ipv4_ip:
-                    display_ip.append(ipv6_ip)
-                ip_str = " | ".join(display_ip) if display_ip else (eff_v4 or "")
+            country_name = await GeolocationService.get_country_name(country_code)
 
-                meta = {
-                    "country_code": country_code,
-                    "country_name": country_name,
-                    "latency_ms": latency,
-                    "location": location,
-                    "loc_score": loc_score,
-                }
+            display_ip = []
+            if ipv4_ip:
+                display_ip.append(ipv4_ip)
+            if ipv6_ip and ipv6_ip != ipv4_ip:
+                display_ip.append(ipv6_ip)
+            ip_str = " | ".join(display_ip) if display_ip else (eff_v4 or "")
 
-                new_name = format_descriptive_node_name(
-                    node=node,
-                    country_code=country_code,
-                    country_name=country_name,
-                    ip_str=ip_str,
-                    loc_score=0.0 if routing_enabled else loc_score,
-                )
-                if location is not None:
-                    new_name += (f" | Location {location.get('country') or 'unknown'} "
-                                 f"{loc_score:.0%} ({location.get('votes', 0)}/{location.get('total', 0)} votes)")
-                supported_node = f"{node.split('#', 1)[0]}#{urllib.parse.quote(new_name)}"
-                self.node_metadata[node] = meta
-                self.node_metadata[original_node] = meta
-                self.node_metadata[supported_node] = meta
+            meta = {
+                "country_code": country_code,
+                "country_name": country_name,
+                "latency_ms": latency,
+                "location": location,
+                "loc_score": loc_score,
+            }
 
-                safe_print(f"[*] Node {idx}/{self.total_nodes} -> {new_name}")
-                return supported_node, latency, node
+            new_name = format_descriptive_node_name(
+                node=node,
+                country_code=country_code,
+                country_name=country_name,
+                ip_str=ip_str,
+                loc_score=0.0 if routing_enabled else loc_score,
+            )
+            if location is not None:
+                new_name += (f" | Location {location.get('country') or 'unknown'} "
+                             f"{loc_score:.0%} ({location.get('votes', 0)}/{location.get('total', 0)} votes)")
+            supported_node = f"{link.split('#', 1)[0]}#{urllib.parse.quote(new_name)}"
+            self.node_metadata[node] = meta
+            self.node_metadata[original_node] = meta
+            self.node_metadata[supported_node] = meta
+
+            safe_print(f"[*] Node {idx}/{self.total_nodes} -> {new_name}")
+            return supported_node, latency, node
         except Exception as e:
             ErrorTracker.record_error("Test Node", e)
             return None

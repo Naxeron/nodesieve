@@ -15,6 +15,7 @@ website is probed — through a dual-stage, router-representative pipeline:
        ├── Exit IPv4/IPv6, country and latency via Cloudflare trace
        ├── Drop: no outbound connectivity, exit IP equal to this host's IP (leak)
        ├── Mihomo target: reject RU/BY/CN/IR/KP/SY/CU exits, apply allowed_countries
+       ├── Mihomo target: a qualifying node keeps multiplexing (use_mux) only if it answers a request through it
        └── Steer target: ipregion GeoIP consensus per IP family against routing.main
        │
        ├──────────────► Steer target: [Main Pool Export]
@@ -85,7 +86,7 @@ identifiers before deploying a new configuration.
 ### `NodeTester` ↔ `dashboard.py`
 - `class NodeTester`:
   - `async def async_check_tcp_node(node, timeout=1.5) -> Optional[str]`: Phase 0 TCP reachability.
-  - `async def test_node_full(idx, node) -> Optional[Tuple[str, float, str]]`: Stage 1 IP check. Returns `(relabelled_node, latency_ms, tested_node)` or `None`; the outcome, including a drop reason, is recorded in `node_metadata`.
+  - `async def test_node_full(idx, node) -> Optional[Tuple[str, float, str]]`: Stage 1 IP check. Returns `(relabelled_node, latency_ms, tested_node)` or `None`; the outcome, including a drop reason, is recorded in `node_metadata`. The node is checked without multiplexing; when `use_mux` applies to it and its server does not answer through sing-mux, the relabelled link is marked `smux=0`, which `node_url_to_mihomo_dict` reads as "no multiplexing" for the speedtest, router validation and deployment.
   - `async def speedtest_node(idx, node, timeout) -> Optional[Tuple[str, float, float]]`: Returns `(relabelled_node, bytes_per_second, location_score)`.
 
 ### `RouterClient` ↔ `RouterValidator` / `pusher.py`

@@ -30,6 +30,8 @@ tests/
 │   ├── test_tester.py                  # NodeTester TCP ping, IP resolution, Phase 1 IP check, speedtest
 │   ├── test_location.py                # ipregion GeoIP consensus and its subprocess handling
 │   ├── test_main_routing.py            # Main-pool location policy and candidate selection
+│   ├── test_multiplexing.py            # use_mux: a node is checked without multiplexing and keeps it,
+│   │                                   # up to the router config, only if its server answers through it
 │   ├── test_routing_ui.py              # Routing menu and routing CLI flags
 │   ├── test_routing_pipeline.py        # Steer check/export/deploy boundaries
 │   ├── test_steer_export.py            # Steer artifacts; the apply script run in /bin/sh against a

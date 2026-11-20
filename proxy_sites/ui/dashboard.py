@@ -172,6 +172,11 @@ class VPNDashboard:
 
         supported_nodes.sort(key=lambda x: x[1])
         log.info(f"\n[*] Phase 1 complete. Found {len(supported_nodes)} working nodes.")
+        if tester.mux_offered:
+            log.info(
+                f"[*] Multiplexing: {tester.mux_supported} of {tester.mux_offered} eligible working nodes support it"
+                + ("; the rest are used without it." if tester.mux_supported < tester.mux_offered else ".")
+            )
 
         # Steer runs its own core; the legacy verifier changes Mihomo's
         # provider and cannot verify this target. Keep these results explicitly local.

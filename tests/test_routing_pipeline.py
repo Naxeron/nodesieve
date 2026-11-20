@@ -197,7 +197,7 @@ def test_steer_scan_never_stages_mihomo_on_router(tmp_path):
     config.update(workers=1, tcp_workers=1, enable_router_validation=True)
     dashboard = VPNDashboard(config)
     node = candidate("only")
-    tester = MagicMock(test_node_full=AsyncMock(return_value=(node, 10, node)))
+    tester = MagicMock(test_node_full=AsyncMock(return_value=(node, 10, node)), mux_offered=0)
     with patch.object(dashboard, "_get_real_ip", AsyncMock(return_value=None)), \
             patch.object(dashboard, "filter_tcp", AsyncMock(return_value=[node])), \
             patch("proxy_sites.ui.dashboard.ResourceLimits.get_max_safe_workers", return_value=(4, 8192)), \

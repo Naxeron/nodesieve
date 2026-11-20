@@ -1,6 +1,8 @@
 """Unit tests for URL parsers, protocol detectors, and naming formatters."""
 
+import json
 import unittest
+import urllib.parse
 from proxy_sites.parsers.base import (
     extract_host_port,
     extract_node_protocol,
@@ -73,6 +75,93 @@ class TestParsers(unittest.TestCase):
         self.assertEqual(d["network"], "ws")
         self.assertEqual(d["ws-opts"]["path"], "/ws-path")
         self.assertNotIn("smux", d)
+
+    def test_node_url_to_mihomo_dict_vless_xhttp(self):
+        """An XHTTP link becomes Mihomo's xhttp transport with the request shaping from its "extra" JSON."""
+        extra = {
+            "xmux": {
+                "cMaxLifetimeMs": 0, "cMaxReuseTimes": "36-96", "maxConcurrency": "8-32", "maxConnections": 0,
+                "hMaxRequestTimes": "320-640", "hMaxReusableSecs": 1800,
+            },
+            "xPaddingObfsMode": True, "xPaddingBytes": "100-1000", "xPaddingKey": "xss",
+            "xPaddingHeader": "api_v1", "xPaddingPlacement": "query", "xPaddingMethod": "tokenish",
+            "uplinkHTTPMethod": "GET", "uplinkDataPlacement": "body", "uplinkDataKey": "X-Ver",
+            # The current names win over the ones older Xray versions read.
+            "sessionIDPlacement": "query", "sessionPlacement": "path", "sessionIDKey": "auth", "sessionKey": "old",
+            "sessionIDTable": "alphabet", "sessionIDLength": "20", "seqPlacement": "query", "seqKey": "id",
+            "scMaxEachPostBytes": "100-1000000", "scMinPostsIntervalMs": 30,
+            # Zero means "not set" to Xray, and these three only concern the server.
+            "uplinkChunkSize": 0, "noSSEHeader": True, "scMaxBufferedPosts": 30, "scStreamUpServerSecs": "20-80",
+        }
+        url = (
+            "vless://33333333-3333-4333-8333-333333333333@198.51.100.20:443?encryption=none&type=xhttp"
+            "&path=%2Fgateway%2Fv1%2F&host=cdn.example.com&mode=packet-up&extra="
+            + urllib.parse.quote(json.dumps(extra))
+            + "&security=tls&sni=cdn.example.com&fp=edge&alpn=h2#XHTTP"
+        )
+        d = node_url_to_mihomo_dict(url, use_mux=False)
+        self.assertEqual(d["network"], "xhttp")
+        self.assertEqual(d["alpn"], ["h2"])
+        self.assertNotIn("http-opts", d)
+        self.assertEqual(d["xhttp-opts"], {
+            "path": "/gateway/v1/",
+            "host": "cdn.example.com",
+            "mode": "packet-up",
+            "x-padding-obfs-mode": True,
+            "x-padding-bytes": "100-1000",
+            "x-padding-key": "xss",
+            "x-padding-header": "api_v1",
+            "x-padding-placement": "query",
+            "x-padding-method": "tokenish",
+            "uplink-http-method": "GET",
+            "session-placement": "query",
+            "session-key": "auth",
+            "session-table": "alphabet",
+            "session-length": "20",
+            "seq-placement": "query",
+            "seq-key": "id",
+            "uplink-data-placement": "body",
+            "uplink-data-key": "X-Ver",
+            "sc-max-each-post-bytes": "100-1000000",
+            "sc-min-posts-interval-ms": "30",
+            "reuse-settings": {
+                "max-concurrency": "8-32",
+                "c-max-reuse-times": "36-96",
+                "h-max-request-times": "320-640",
+                "h-max-reusable-secs": "1800",
+            },
+        })
+
+    def test_node_url_to_mihomo_dict_xhttp_without_usable_extra(self):
+        base = "vless://uuid@198.51.100.20:443?type=xhttp&path=%2Fx&security=tls&sni=example.com"
+        for extra in ("", "&extra=not-json", "&extra=%5B1%5D", "&extra=%7B%7D"):
+            with self.subTest(extra=extra):
+                d = node_url_to_mihomo_dict(base + extra + "#X", use_mux=False)
+                self.assertEqual(d["network"], "xhttp")
+                self.assertEqual(d["xhttp-opts"], {"path": "/x"})
+
+    def test_node_url_to_mihomo_dict_checks_the_certificate_against_the_name_in_vcn(self):
+        # A node addressed by IP sends no usable SNI; its certificate is issued to the name in vcn.
+        url = "vless://uuid@198.51.100.30:443?type=ws&path=%2Fws&security=tls&sni=198.51.100.30&vcn=cert.example.com#ByIP"
+        d = node_url_to_mihomo_dict(url, use_mux=False)
+        self.assertEqual(d["servername"], "198.51.100.30")
+        self.assertEqual(d["name-cert-verify"], "cert.example.com")
+        self.assertNotIn("skip-cert-verify", d)
+
+        # Xray accepts a list of names, Mihomo a single one.
+        trojan = node_url_to_mihomo_dict(
+            "trojan://secret@198.51.100.30:443?security=tls&vcn=%20a.example.com%20,b.example.com#Trojan", use_mux=False,
+        )
+        self.assertEqual(trojan["name-cert-verify"], "a.example.com")
+
+        for link in (
+            "vless://uuid@example.com:443?type=ws&security=tls&sni=example.com#NoVcn",
+            # REALITY does not verify a certificate name.
+            "vless://uuid@198.51.100.30:443?security=reality&pbk=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+            "&sni=example.com&vcn=cert.example.com#Reality",
+        ):
+            with self.subTest(link=link):
+                self.assertNotIn("name-cert-verify", node_url_to_mihomo_dict(link, use_mux=False))
 
     def test_format_descriptive_node_name(self):
         name = format_descriptive_node_name(

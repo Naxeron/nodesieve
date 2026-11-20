@@ -80,6 +80,25 @@ the exit IP, followed by `⚡ … MB/s` after the speedtest and `LOC: …%` when
 `enable_loc_ranking` is on. The second is Steer: the country is the GeoIP
 consensus, with its agreement and vote count.
 
+### How a node is connected
+
+Each link is translated into a Mihomo proxy, so a node is checked the way Mihomo
+connects to it, here and on the router. Links are read as Xray writes them: TCP,
+WebSocket, gRPC and XHTTP transports, including the request shaping in an XHTTP
+link's `extra`, and `vcn`, the certificate name of a node that is addressed by IP.
+A link's `fm` settings (Xray's finalmask, for example TLS ClientHello fragmentation)
+have no Mihomo counterpart and are not applied; a node that only works with them
+fails the check.
+
+`use_mux`, on by default, adds sing-mux multiplexing (Mihomo's `smux`) to every node
+except VLESS with XTLS Vision. Multiplexing only works when the node's server
+supports it, which a link doesn't say, and a server without it, which includes every
+Xray server, drops each multiplexed connection. So a node is always checked without
+multiplexing. One that qualifies is then asked for a single request through it and
+keeps multiplexing, in the speedtest and on the router, only if it answers; the scan
+reports how many nodes do. Set `use_mux` to `false` in `proxy_sites_config.json` to
+skip that request. Steer connects with its own core, so a Steer scan never asks.
+
 ### Mihomo target
 
 After the IP check, surviving nodes are staged on the router and kept only if they
