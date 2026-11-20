@@ -1,7 +1,4 @@
-"""Constants, default configuration, file paths, and YAML templates.
-
-Used for Proxy Site Checker.
-"""
+"""Constants, default configuration, file paths, and YAML templates."""
 
 import os
 from pathlib import Path
@@ -9,7 +6,10 @@ from typing import Any, Dict, Set
 
 # Base paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_FILE = "proxy_sites_config.json"
+CONFIG_FILE = "nodesieve_config.json"
+# The settings file's name before the project was renamed from Proxy Site Checker;
+# ConfigManager.default_path renames it to CONFIG_FILE.
+LEGACY_CONFIG_FILE = "proxy_sites_config.json"
 ROUTER_SCRIPT_FILE = "apply_to_router.sh"
 CRASHED_LOG_FILE = "crashed_nodes.txt"
 SUB_CACHE_DIR = "sub_cache"

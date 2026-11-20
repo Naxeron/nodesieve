@@ -2,9 +2,9 @@
 
 import asyncio
 import unittest
-from proxy_sites.core.mihomo import MihomoManager
-from proxy_sites.geo import GeolocationService
-from proxy_sites.logging import safe_close_writer
+from nodesieve.core.mihomo import MihomoManager
+from nodesieve.geo import GeolocationService
+from nodesieve.logging import safe_close_writer
 
 
 class TestConcurrency(unittest.TestCase):
@@ -56,7 +56,7 @@ class TestConcurrency(unittest.TestCase):
 
     def test_mihomo_runner_cleanup_on_aenter_exception(self):
         async def run():
-            from proxy_sites.core.mihomo import MihomoRunner
+            from nodesieve.core.mihomo import MihomoRunner
 
             initial_ports = set(MihomoManager._allocated_ports)
             runner = MihomoRunner("awg_conf:non_existent_file.conf#Invalid", config={})
@@ -72,7 +72,7 @@ class TestConcurrency(unittest.TestCase):
 
     def test_stockpile_existing_ip_deduplication(self):
         import urllib.parse
-        from proxy_sites.parsers.base import extract_host_port
+        from nodesieve.parsers.base import extract_host_port
 
         existing_nodes = [
             "vless://uuid@server1.example.com:443#%5BVLESS%3A%20Server1%5D%20%F0%9F%87%BA%F0%9F%87%B8%20United-States%20%7C%20203.0.113.50"
@@ -119,7 +119,7 @@ class TestConcurrency(unittest.TestCase):
 
     def test_fetcher_base64_padded_decoding(self):
         import base64
-        from proxy_sites.core.fetcher import NodeFetcher
+        from nodesieve.core.fetcher import NodeFetcher
 
         _ = NodeFetcher(config={})
         raw_sub = "vless://uuid@1.2.3.4:443?type=tcp#Node1\ntrojan://pass@5.6.7.8:443#Node2\n"

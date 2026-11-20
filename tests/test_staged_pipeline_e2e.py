@@ -14,9 +14,9 @@ import unittest
 from typing import Any, Dict, List
 import yaml
 
-from proxy_sites.constants import GEOBLOCKED_REGIONS
-from proxy_sites.router.script_generator import generate_router_script
-from proxy_sites.parsers.base import get_node_name
+from nodesieve.constants import GEOBLOCKED_REGIONS
+from nodesieve.router.script_generator import generate_router_script
+from nodesieve.parsers.base import get_node_name
 
 
 def get_ephemeral_port() -> int:
@@ -242,7 +242,7 @@ class TestStagedPipelineE2E(unittest.TestCase):
         """Validates RouterValidator behavior on candidate nodes."""
         import asyncio
         from unittest.mock import AsyncMock, MagicMock
-        from proxy_sites.core.router_validator import RouterValidator
+        from nodesieve.core.router_validator import RouterValidator
 
         mock_client = MagicMock()
         mock_client.is_api_alive = AsyncMock(return_value=True)

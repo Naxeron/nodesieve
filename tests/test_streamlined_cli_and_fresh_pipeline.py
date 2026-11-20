@@ -10,14 +10,14 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from proxy_sites.config import ConfigManager
-from proxy_sites.constants import CONFIG_FILE
-from proxy_sites.core.fetcher import NodeFetcher
-from proxy_sites.core.router_validator import RouterValidator
-from proxy_sites.router.script_generator import generate_router_script
-from proxy_sites.ui.cli import build_parser, main
-import proxy_sites.ui.dashboard as dashboard_module
-from proxy_sites.ui.dashboard import VPNDashboard
+from nodesieve.config import ConfigManager
+from nodesieve.constants import CONFIG_FILE, LEGACY_CONFIG_FILE
+from nodesieve.core.fetcher import NodeFetcher
+from nodesieve.core.router_validator import RouterValidator
+from nodesieve.router.script_generator import generate_router_script
+from nodesieve.ui.cli import build_parser, main
+import nodesieve.ui.dashboard as dashboard_module
+from nodesieve.ui.dashboard import VPNDashboard
 
 
 class TestStreamlinedCLI(unittest.TestCase):
@@ -35,19 +35,19 @@ class TestStreamlinedCLI(unittest.TestCase):
     @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
     def test_cli_default_config_loads_and_saves_from_project_directory(self, mock_pipeline):
         """Subscription edits use the canonical project config from any working directory."""
-        self.assertEqual(CONFIG_FILE, "proxy_sites_config.json")
+        self.assertEqual(CONFIG_FILE, "nodesieve_config.json")
         with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as caller_dir:
-            config_path = os.path.join(project_dir, "proxy_sites_config.json")
+            config_path = os.path.join(project_dir, "nodesieve_config.json")
             with open(config_path, "w", encoding="utf-8") as config_file:
                 json.dump({"subscriptions": ["https://example.com/existing"], "workers": 7}, config_file)
             previous_cwd = os.getcwd()
             try:
                 os.chdir(caller_dir)
-                with patch("proxy_sites.ui.cli.PROJECT_ROOT", project_dir):
+                with patch("nodesieve.ui.cli.PROJECT_ROOT", project_dir):
                     with self.assertRaises(SystemExit) as exit_result:
                         main(["--add-sub", "https://example.com/new"])
                 self.assertEqual(exit_result.exception.code, 0)
-                self.assertFalse(os.path.exists("proxy_sites_config.json"))
+                self.assertFalse(os.path.exists("nodesieve_config.json"))
             finally:
                 os.chdir(previous_cwd)
 
@@ -55,6 +55,24 @@ class TestStreamlinedCLI(unittest.TestCase):
                 saved = json.load(config_file)
             self.assertEqual(saved["subscriptions"], ["https://example.com/existing", "https://example.com/new"])
             self.assertEqual(saved["workers"], 7)
+            mock_pipeline.assert_not_called()
+
+    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
+    def test_cli_carries_over_settings_saved_under_the_former_name(self, mock_pipeline):
+        """Settings in proxy_sites_config.json, the file's name before the rename, move to the new file."""
+        with tempfile.TemporaryDirectory() as project_dir:
+            legacy_path = os.path.join(project_dir, LEGACY_CONFIG_FILE)
+            with open(legacy_path, "w", encoding="utf-8") as config_file:
+                json.dump({"subscriptions": ["https://example.com/existing"], "router_ssh_pass": "secret"}, config_file)
+            with patch("nodesieve.ui.cli.PROJECT_ROOT", project_dir):
+                with self.assertRaises(SystemExit) as exit_result:
+                    main(["--add-sub", "https://example.com/new"])
+            self.assertEqual(exit_result.exception.code, 0)
+            self.assertFalse(os.path.exists(legacy_path))
+            with open(os.path.join(project_dir, CONFIG_FILE), encoding="utf-8") as config_file:
+                saved = json.load(config_file)
+            self.assertEqual(saved["subscriptions"], ["https://example.com/existing", "https://example.com/new"])
+            self.assertEqual(saved["router_ssh_pass"], "secret")
             mock_pipeline.assert_not_called()
 
     def test_cli_parser_phase_flags(self):
@@ -471,7 +489,7 @@ class TestAutomatedDeploymentAndRollbackSafety(unittest.TestCase):
 
     def test_push_to_router_with_custom_config_parameters(self):
         """push_to_router constructs RouterClient using provided config when router_client is None."""
-        from proxy_sites.router.pusher import push_to_router
+        from nodesieve.router.pusher import push_to_router
         custom_config = {
             "router_host": "192.168.123.45",
             "router_api_port": 9099,
@@ -480,7 +498,7 @@ class TestAutomatedDeploymentAndRollbackSafety(unittest.TestCase):
             "router_ssh_user": "custom_root",
             "router_ssh_pass": "custom_password",
         }
-        with patch("proxy_sites.router.pusher.RouterClient") as mock_rc:
+        with patch("nodesieve.router.pusher.RouterClient") as mock_rc:
             mock_instance = mock_rc.return_value
             mock_instance.stream_file_to_router.return_value = True
             mock_instance.exec_command.return_value = (0, "ok", "")
@@ -489,7 +507,7 @@ class TestAutomatedDeploymentAndRollbackSafety(unittest.TestCase):
                 script_path = os.path.join(tmp_dir, "apply_to_router.sh")
                 with open(script_path, "w") as f:
                     f.write("#!/bin/sh\necho ok\n")
-                with patch("proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", script_path):
+                with patch("nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_path):
                     res = push_to_router(config=custom_config)
                     self.assertTrue(res)
 
@@ -513,7 +531,7 @@ class TestAutomatedDeploymentAndRollbackSafety(unittest.TestCase):
             "router_ssh_pass": "supersecret",
         }
         dash = VPNDashboard(config=custom_config)
-        with patch("proxy_sites.ui.dashboard.push_to_router") as mock_pusher:
+        with patch("nodesieve.ui.dashboard.push_to_router") as mock_pusher:
             mock_pusher.return_value = True
             res = dash.push_to_router()
             self.assertTrue(res)
@@ -597,7 +615,7 @@ class TestAutomatedDeploymentAndRollbackSafety(unittest.TestCase):
 
     def test_build_router_config_yaml_custom_ports(self):
         """build_router_config_yaml replaces ports when custom configuration is passed."""
-        from proxy_sites.router.config_builder import build_router_config_yaml
+        from nodesieve.router.config_builder import build_router_config_yaml
         custom_cfg = {
             "router_api_port": 9099,
             "router_proxy_port": 7898,

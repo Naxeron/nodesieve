@@ -28,14 +28,14 @@ from unittest.mock import MagicMock, patch
 import yaml
 import pytest
 
-from proxy_sites.constants import PROJECT_ROOT, ROUTER_CONFIG_TEMPLATE
-from proxy_sites.core.mihomo import MihomoManager
-from proxy_sites.core.router_validator import RouterValidator
-from proxy_sites.geo import GeolocationService
-from proxy_sites.logging import safe_close_writer
-from proxy_sites.router.config_builder import build_router_config_yaml
-from proxy_sites.router.script_generator import generate_router_script
-from proxy_sites.warp import WarpScanner
+from nodesieve.constants import PROJECT_ROOT, ROUTER_CONFIG_TEMPLATE
+from nodesieve.core.mihomo import MihomoManager
+from nodesieve.core.router_validator import RouterValidator
+from nodesieve.geo import GeolocationService
+from nodesieve.logging import safe_close_writer
+from nodesieve.router.config_builder import build_router_config_yaml
+from nodesieve.router.script_generator import generate_router_script
+from nodesieve.warp import WarpScanner
 
 # A made-up WARP registration: the key is the bytes 0..31.
 WARP_SETTINGS = {

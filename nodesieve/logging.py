@@ -32,7 +32,7 @@ class MemPrefixFormatter(logging.Formatter):
         return record.getMessage()
 
 
-def setup_logger(name: str = "ProxySiteChecker") -> logging.Logger:
+def setup_logger(name: str = "nodesieve") -> logging.Logger:
     """Creates or configures standard logger for the application."""
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)

@@ -10,8 +10,8 @@ import textwrap
 
 import pytest
 
-from proxy_sites.router.steer import routing_fingerprint, write_steer_artifacts
-from proxy_sites.routing import normalize_routing
+from nodesieve.router.steer import routing_fingerprint, write_steer_artifacts
+from nodesieve.routing import normalize_routing
 
 
 NODE = "vless://11111111-1111-4111-8111-111111111111@192.0.2.1:443?security=tls&sni=example.org#First%20server"

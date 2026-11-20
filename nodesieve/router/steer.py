@@ -20,13 +20,17 @@ import re
 import tempfile
 from urllib.parse import quote, unquote
 
-from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict
-from proxy_sites.routing import main_location_rank, main_policy_failure, normalize_routing
+from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
+from nodesieve.routing import main_location_rank, main_policy_failure, normalize_routing
 
 OUTPUT_DIR = "steer-output"
 SCRIPT_NAME = "apply_steer.sh"
 SERVERS_NAME = "steer-servers.txt"
 REPORT_NAME = "routing-report.json"
+# PSC_ comes from the project's former name, Proxy Site Checker. It prefixes the lines the
+# script prints for dashboard.py (PSC_OK, PSC_ERROR, PSC_LOG, PSC_NOTE) and the documented
+# PSC_CHECK_ONLY switch. It stays: deploy runs the script an earlier check saved, which may
+# predate the rename.
 # Closes the quoted here-document that carries the links; a link can never be this line.
 _SERVERS_END = "PSC_SERVERS_END"
 

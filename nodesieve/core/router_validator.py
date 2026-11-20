@@ -11,14 +11,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from proxy_sites.config import ConfigManager
-from proxy_sites.constants import GOOGLE_HEALTHCHECK_URL, PROJECT_ROOT
-from proxy_sites.logging import log
-from proxy_sites.parsers.awg import parse_amnezia_conf
-from proxy_sites.parsers.base import extract_host_port, get_node_name
-from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict
-from proxy_sites.router.client import RouterClient
-from proxy_sites.warp import WarpScanner
+from nodesieve.config import ConfigManager
+from nodesieve.constants import GOOGLE_HEALTHCHECK_URL, PROJECT_ROOT
+from nodesieve.logging import log
+from nodesieve.parsers.awg import parse_amnezia_conf
+from nodesieve.parsers.base import extract_host_port, get_node_name
+from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
+from nodesieve.router.client import RouterClient
+from nodesieve.warp import WarpScanner
 
 
 class RouterUnreachableError(Exception):

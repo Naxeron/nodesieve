@@ -21,7 +21,7 @@ import tempfile
 from typing import List, Optional, Tuple
 import urllib.request
 
-from proxy_sites.location import GEOIP_GROUP, REPORT_VERSION
+from nodesieve.location import GEOIP_GROUP, REPORT_VERSION
 
 REPOSITORY = "vernette/ipregion"
 SCRIPT_NAME = "ipregion.sh"

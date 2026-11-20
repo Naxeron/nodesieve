@@ -9,9 +9,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-from proxy_sites.routing import normalize_routing
-from proxy_sites.router.client import RouterClient
-from proxy_sites.ui.dashboard import VPNDashboard
+from nodesieve.routing import normalize_routing
+from nodesieve.router.client import RouterClient
+from nodesieve.ui.dashboard import VPNDashboard
 
 
 def config_for(directory):
@@ -90,7 +90,7 @@ def test_new_failed_scan_invalidates_previous_deployment(tmp_path):
         assert not asyncio.run(dashboard.run_pipeline_async(check_only=True))
     assert not (tmp_path / "apply_steer.sh").exists()
     assert not (tmp_path / "steer-servers.txt").exists()
-    with patch("proxy_sites.ui.dashboard.RouterClient") as client:
+    with patch("nodesieve.ui.dashboard.RouterClient") as client:
         assert not dashboard.deploy_steer()
     client.assert_not_called()
 
@@ -101,7 +101,7 @@ def test_deploy_checks_policy_age_and_script_before_ssh(tmp_path):
     dashboard = VPNDashboard(config)
     with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(nodes, MagicMock(node_metadata=metadata)))):
         assert asyncio.run(dashboard.run_pipeline_async(check_only=True))
-    with patch("proxy_sites.ui.dashboard.RouterClient") as client:
+    with patch("nodesieve.ui.dashboard.RouterClient") as client:
         assert asyncio.run(dashboard.run_pipeline_async(deploy_only=True, dry_run=True))
         client.assert_not_called()
         config["routing"]["main"]["min_votes"] = 4
@@ -127,7 +127,7 @@ def test_run_streams_script_only_after_successful_export(tmp_path):
     nodes, metadata = evidence()
     dashboard = VPNDashboard(config)
     with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(nodes, MagicMock(node_metadata=metadata)))), \
-            patch("proxy_sites.ui.dashboard.RouterClient") as client:
+            patch("nodesieve.ui.dashboard.RouterClient") as client:
         client.return_value.exec_command.return_value = (0, "PSC_OK: Steer main servers replaced: 2 servers\n", "")
         assert asyncio.run(dashboard.run_pipeline_async())
         args, kwargs = client.return_value.exec_command.call_args
@@ -142,12 +142,12 @@ def test_failed_deployment_reports_the_router_messages(tmp_path, caplog):
     nodes, metadata = evidence()
     dashboard = VPNDashboard(config)
     with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(nodes, MagicMock(node_metadata=metadata)))), \
-            patch("proxy_sites.ui.dashboard.RouterClient") as client:
+            patch("nodesieve.ui.dashboard.RouterClient") as client:
         client.return_value.exec_command.return_value = (
             1, "Waiting for Steer: 10s\nRestoring the previous Steer servers\n",
             "PSC_ERROR: Steer did not apply the new servers: the panel reported a failure while applying\n"
             "PSC_LOG: ОШИБКА: ядро steer не приняло настройки\nPSC_ERROR: The previous servers were restored.\n")
-        with caplog.at_level("INFO", logger="ProxySiteChecker"):
+        with caplog.at_level("INFO", logger="nodesieve"):
             assert not asyncio.run(dashboard.run_pipeline_async())
         text = caplog.text
         assert "Steer did not apply the new servers" in text
@@ -156,14 +156,14 @@ def test_failed_deployment_reports_the_router_messages(tmp_path, caplog):
         caplog.clear()
         client.return_value.exec_command.return_value = (
             0, "PSC_NOTE: Steer accepted the servers, but its VPN tunnel is not up yet. Check the panel.\nPSC_OK: Steer main servers replaced: 2 servers\n", "")
-        with caplog.at_level("INFO", logger="ProxySiteChecker"):
+        with caplog.at_level("INFO", logger="nodesieve"):
             assert dashboard.deploy_steer()
         assert "its VPN tunnel is not up yet" in caplog.text
         assert "[+] Steer main servers replaced: 2 servers" in caplog.text
         # A clean exit without the router's confirmation is not a success.
         caplog.clear()
         client.return_value.exec_command.return_value = (0, "Waiting for Steer: 10s\n", "")
-        with caplog.at_level("INFO", logger="ProxySiteChecker"):
+        with caplog.at_level("INFO", logger="nodesieve"):
             assert not dashboard.deploy_steer()
         assert "The router did not confirm the change" in caplog.text
 
@@ -200,11 +200,11 @@ def test_steer_scan_never_stages_mihomo_on_router(tmp_path):
     tester = MagicMock(test_node_full=AsyncMock(return_value=(node, 10, node)), mux_offered=0)
     with patch.object(dashboard, "_get_real_ip", AsyncMock(return_value=None)), \
             patch.object(dashboard, "filter_tcp", AsyncMock(return_value=[node])), \
-            patch("proxy_sites.ui.dashboard.ResourceLimits.get_max_safe_workers", return_value=(4, 8192)), \
-            patch("proxy_sites.ui.dashboard.NodeFetcher.fetch_all", AsyncMock(return_value=([node], {}))), \
-            patch("proxy_sites.ui.dashboard.MihomoManager.setup"), \
-            patch("proxy_sites.ui.dashboard.NodeTester", return_value=tester), \
-            patch("proxy_sites.core.router_validator.RouterValidator") as router_validator:
+            patch("nodesieve.ui.dashboard.ResourceLimits.get_max_safe_workers", return_value=(4, 8192)), \
+            patch("nodesieve.ui.dashboard.NodeFetcher.fetch_all", AsyncMock(return_value=([node], {}))), \
+            patch("nodesieve.ui.dashboard.MihomoManager.setup"), \
+            patch("nodesieve.ui.dashboard.NodeTester", return_value=tester), \
+            patch("nodesieve.core.router_validator.RouterValidator") as router_validator:
         nodes, used_tester = asyncio.run(dashboard.fetch_and_verify_candidates_async())
     assert nodes == [(node, 10, node)]
     assert used_tester is tester

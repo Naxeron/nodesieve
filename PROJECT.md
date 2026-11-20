@@ -1,7 +1,7 @@
-# Proxy Site Checker
+# nodesieve
 
 ## Architecture
-`Proxy Site Checker` qualifies proxy nodes by their exit IP alone — no individual
+`nodesieve` qualifies proxy nodes by their exit IP alone — no individual
 website is probed — through a dual-stage, router-representative pipeline:
 
 ```
@@ -67,9 +67,9 @@ website is probed — through a dual-stage, router-representative pipeline:
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Router Communication & Tooling Layer | Implement `RouterClient` (`proxy_sites/router/client.py`), modernize `ssh_router.py` with Paramiko, update `pusher.py` to use SSH stdin streaming | none | DONE |
-| M2 | Router Configuration Parity & Deployment Hardening | Update `ROUTER_CONFIG_TEMPLATE` (`proxy_sites/constants.py`), `config_builder.py`, `script_generator.py` with Google 204 health checks, `prefer-ipv6: false`, pre-flight syntax check, and atomic rollback | none | DONE |
-| M3 | Staged Router-Representative Validation Pipeline | Implement `RouterValidator` (`proxy_sites/core/router_validator.py`), integrate Stage 1/2 workflow into `dashboard.py` and `tester.py` | M1, M2 | DONE |
+| M1 | Router Communication & Tooling Layer | Implement `RouterClient` (`nodesieve/router/client.py`), modernize `ssh_router.py` with Paramiko, update `pusher.py` to use SSH stdin streaming | none | DONE |
+| M2 | Router Configuration Parity & Deployment Hardening | Update `ROUTER_CONFIG_TEMPLATE` (`nodesieve/constants.py`), `config_builder.py`, `script_generator.py` with Google 204 health checks, `prefer-ipv6: false`, pre-flight syntax check, and atomic rollback | none | DONE |
+| M3 | Staged Router-Representative Validation Pipeline | Implement `RouterValidator` (`nodesieve/core/router_validator.py`), integrate Stage 1/2 workflow into `dashboard.py` and `tester.py` | M1, M2 | DONE |
 | M4 | Final Milestone: E2E Test Pass & Adversarial Hardening | Pass 100% of Dual-Track E2E tests (Tiers 1-4), then execute Phase 2 adversarial coverage hardening (Tier 5) | M1, M2, M3, E2E Track | DONE |
 
 ## Parallel Track: E2E Testing Track
@@ -116,7 +116,9 @@ identifiers before deploying a new configuration.
 
 ## Code Layout
 ```
-proxy_sites/
+nodesieve/
+├── __main__.py                      # Entry point: python -m nodesieve
+├── config.py                        # Settings file (nodesieve_config.json, carried over from proxy_sites_config.json)
 ├── constants.py                     # ROUTER_CONFIG_TEMPLATE, router connection constants
 ├── routing.py                       # Main-pool location policy and candidate selection
 ├── location.py                      # ipregion GeoIP consensus through a node's proxy
@@ -132,7 +134,7 @@ proxy_sites/
 │   ├── pusher.py                    # push_to_router (SSH stdin streaming)
 │   └── script_generator.py          # generate_router_script (apply_to_router.sh)
 └── ui/
-    ├── cli.py                       # Command-line entry point
+    ├── cli.py                       # Command-line options and actions
     ├── dashboard.py                 # Pipeline UI and workflow coordinator
     └── routing.py                   # Steer routing menu
 ssh_router.py                        # Standalone SSH CLI helper (Paramiko-based)

@@ -1,16 +1,39 @@
-"""Configuration management and persistence for Proxy Site Checker."""
+"""Configuration management and persistence for nodesieve."""
 
 import json
 import copy
 import os
 import re
-from typing import Any, Dict
-from proxy_sites.constants import CONFIG_FILE, DEFAULT_CONFIG
-from proxy_sites.logging import log
+from typing import Any, Dict, Union
+from nodesieve.constants import CONFIG_FILE, DEFAULT_CONFIG, LEGACY_CONFIG_FILE
+from nodesieve.logging import log
 
 
 class ConfigManager:
     """Manages loading, validating, and persisting user settings."""
+
+    @classmethod
+    def default_path(cls, project_root: Union[str, os.PathLike]) -> str:
+        """The settings file in the project directory.
+
+        Settings saved before the project was renamed are in LEGACY_CONFIG_FILE. While
+        only that file exists, it is renamed to CONFIG_FILE, so subscriptions and router
+        credentials carry over; if it cannot be renamed, it is used under its old name.
+        """
+        path = os.path.join(project_root, CONFIG_FILE)
+        legacy = os.path.join(project_root, LEGACY_CONFIG_FILE)
+        if not os.path.exists(legacy):
+            return path
+        if os.path.exists(path):
+            log.warning(f"[!] Settings are read from {CONFIG_FILE}; {LEGACY_CONFIG_FILE} is no longer used and can be deleted.")
+            return path
+        try:
+            os.rename(legacy, path)
+        except OSError as exc:
+            log.warning(f"[!] Could not rename {LEGACY_CONFIG_FILE} to {CONFIG_FILE} ({exc}); using the old file.")
+            return legacy
+        log.info(f"[*] Renamed {LEGACY_CONFIG_FILE} to {CONFIG_FILE}.")
+        return path
 
     @classmethod
     def load(cls, path: str = CONFIG_FILE) -> Dict[str, Any]:
@@ -38,7 +61,7 @@ class ConfigManager:
     @classmethod
     def _normalize_config(cls, config: Dict[str, Any]) -> None:
         """Normalizes config entries for backwards-compatibility."""
-        from proxy_sites.routing import normalize_routing
+        from nodesieve.routing import normalize_routing
         config["routing"] = normalize_routing(config.get("routing"))
         # Convert legacy bool goida_mode to proper string
         goida_val = config.get("use_goida_proxies")

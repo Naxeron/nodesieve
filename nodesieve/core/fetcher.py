@@ -16,11 +16,11 @@ import time
 from typing import Dict, List, Optional, Set, Tuple
 import aiohttp
 
-from proxy_sites.constants import PROJECT_ROOT, SUB_CACHE_DIR
-from proxy_sites.logging import ErrorTracker, log
-from proxy_sites.parsers.awg import parse_amnezia_conf
-from proxy_sites.parsers.base import extract_host_port
-from proxy_sites.warp import WarpScanner
+from nodesieve.constants import PROJECT_ROOT, SUB_CACHE_DIR
+from nodesieve.logging import ErrorTracker, log
+from nodesieve.parsers.awg import parse_amnezia_conf
+from nodesieve.parsers.base import extract_host_port
+from nodesieve.warp import WarpScanner
 
 
 def _format_age(seconds: float) -> str:

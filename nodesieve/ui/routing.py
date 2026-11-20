@@ -5,8 +5,8 @@ import os
 import re
 from typing import Callable, Optional
 
-from proxy_sites.router.steer import OUTPUT_DIR
-from proxy_sites.routing import normalize_routing
+from nodesieve.router.steer import OUTPUT_DIR
+from nodesieve.routing import normalize_routing
 
 
 def _main_lines(policy: dict) -> list[str]:

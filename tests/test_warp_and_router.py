@@ -7,14 +7,14 @@ import tempfile
 import unittest
 import yaml
 
-from proxy_sites.constants import (
+from nodesieve.constants import (
     GOOGLE_HEALTHCHECK_URL,
     PROJECT_ROOT,
 )
-from proxy_sites.core.fetcher import NodeFetcher
-from proxy_sites.router.config_builder import build_router_config_yaml
-from proxy_sites.router.script_generator import generate_router_script
-from proxy_sites.warp import WarpScanner
+from nodesieve.core.fetcher import NodeFetcher
+from nodesieve.router.config_builder import build_router_config_yaml
+from nodesieve.router.script_generator import generate_router_script
+from nodesieve.warp import WarpScanner
 
 # A made-up WARP registration: the key is the bytes 0..31.
 WARP_SETTINGS = {

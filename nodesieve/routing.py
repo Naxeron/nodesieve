@@ -3,7 +3,7 @@
 import copy
 import math
 
-from proxy_sites.location import COUNTRIES
+from nodesieve.location import COUNTRIES
 
 
 DEFAULT_ROUTING = {

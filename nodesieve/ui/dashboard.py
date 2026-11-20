@@ -10,21 +10,21 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 import aiohttp
 
-from proxy_sites.config import ConfigManager
-from proxy_sites.constants import (
+from nodesieve.config import ConfigManager
+from nodesieve.constants import (
     IS_TERMUX,
     PROJECT_ROOT,
     ROUTER_SCRIPT_FILE,
 )
-from proxy_sites.core.fetcher import NodeFetcher
-from proxy_sites.core.limits import ResourceLimits
-from proxy_sites.core.mihomo import MihomoManager
-from proxy_sites.core.tester import NodeTester
-from proxy_sites.logging import ErrorTracker, log, update_progress
-from proxy_sites.router.client import RouterClient
-from proxy_sites.router.pusher import push_to_router
-from proxy_sites.router.script_generator import generate_router_script
-from proxy_sites.routing import normalize_routing, select_main_pool
+from nodesieve.core.fetcher import NodeFetcher
+from nodesieve.core.limits import ResourceLimits
+from nodesieve.core.mihomo import MihomoManager
+from nodesieve.core.tester import NodeTester
+from nodesieve.logging import ErrorTracker, log, update_progress
+from nodesieve.router.client import RouterClient
+from nodesieve.router.pusher import push_to_router
+from nodesieve.router.script_generator import generate_router_script
+from nodesieve.routing import normalize_routing, select_main_pool
 
 
 class VPNDashboard:
@@ -184,7 +184,7 @@ class VPNDashboard:
             log.info("[*] Steer: IP checks measured on this computer; router-side validation is not available.")
         elif self.config.get("enable_router_validation", True):
             try:
-                from proxy_sites.core.router_validator import RouterValidator
+                from nodesieve.core.router_validator import RouterValidator
                 validator = RouterValidator(config=self.config)
                 verified_nodes = await validator.verify_nodes_on_router(supported_nodes)
                 if verified_nodes:
@@ -347,7 +347,7 @@ class VPNDashboard:
 
     async def run_routing_pipeline_async(self, check_only=False, deploy_only=False, dry_run=False) -> bool:
         """Export the location-ranked main server list for Steer without touching the Mihomo verifier."""
-        from proxy_sites.router.steer import SCRIPT_NAME, SERVERS_NAME, output_directory, write_steer_artifacts
+        from nodesieve.router.steer import SCRIPT_NAME, SERVERS_NAME, output_directory, write_steer_artifacts
 
         self.config["routing"] = normalize_routing(self.config.get("routing"))
         if deploy_only:
@@ -386,7 +386,7 @@ class VPNDashboard:
 
     def deploy_steer(self, dry_run=False) -> bool:
         """Deploy a fresh reviewed artifact through Zapret Manager's own Steer backend."""
-        from proxy_sites.router.steer import REPORT_NAME, SCRIPT_NAME, output_directory, routing_fingerprint
+        from nodesieve.router.steer import REPORT_NAME, SCRIPT_NAME, output_directory, routing_fingerprint
 
         directory = output_directory(self.config)
         try:

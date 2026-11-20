@@ -13,7 +13,7 @@ from aiohttp import web
 import yaml
 import pytest
 
-from proxy_sites.constants import PROJECT_ROOT
+from nodesieve.constants import PROJECT_ROOT
 
 
 def get_ephemeral_port() -> int:
@@ -230,7 +230,7 @@ class TestMockMihomoRestApi(unittest.IsolatedAsyncioTestCase):
     async def test_router_client_if_available(self):
         """Progressive verification: If RouterClient exists (M1), test it against mock REST server."""
         try:
-            from proxy_sites.router.client import RouterClient
+            from nodesieve.router.client import RouterClient
         except ImportError:
             # Progressive milestone: M1 is in progress
             return

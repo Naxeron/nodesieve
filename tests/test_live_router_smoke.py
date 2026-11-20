@@ -59,7 +59,7 @@ class TestLiveRouterSmoke(unittest.TestCase):
     def test_live_router_rest_api_version(self):
         """Verifies router REST API :9090 /version returns valid Mihomo version."""
         url = f"http://{ROUTER_HOST}:{ROUTER_REST_PORT}/version"
-        req = urllib.request.Request(url, headers={"User-Agent": "check_proxy_sites_smoke"})
+        req = urllib.request.Request(url, headers={"User-Agent": "nodesieve_smoke"})
         with urllib.request.urlopen(req, timeout=3.0) as resp:
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))
@@ -72,7 +72,7 @@ class TestLiveRouterSmoke(unittest.TestCase):
             f"http://{ROUTER_HOST}:{ROUTER_REST_PORT}/proxies/DIRECT/delay"
             f"?timeout=3000&url=https://www.gstatic.com/generate_204"
         )
-        req = urllib.request.Request(url, headers={"User-Agent": "check_proxy_sites_smoke"})
+        req = urllib.request.Request(url, headers={"User-Agent": "nodesieve_smoke"})
         with urllib.request.urlopen(req, timeout=4.0) as resp:
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))
@@ -121,7 +121,7 @@ class TestLiveRouterSmoke(unittest.TestCase):
     def test_live_router_client_if_available(self):
         """Tests RouterClient directly against live router if M1 implementation exists."""
         try:
-            from proxy_sites.router.client import RouterClient
+            from nodesieve.router.client import RouterClient
         except ImportError:
             return
 

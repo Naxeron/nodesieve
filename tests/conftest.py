@@ -12,20 +12,20 @@ from pathlib import Path
 
 import pytest
 
-from proxy_sites.core.fetcher import NodeFetcher
+from nodesieve.core.fetcher import NodeFetcher
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 # Modules that build paths inside the project directory when they run.
 _PROJECT_ROOT_USERS = (
-    "proxy_sites.core.fetcher",
-    "proxy_sites.core.mihomo",
-    "proxy_sites.core.router_validator",
-    "proxy_sites.parsers.base",
-    "proxy_sites.router.pusher",
-    "proxy_sites.router.script_generator",
-    "proxy_sites.ui.cli",
-    "proxy_sites.ui.dashboard",
+    "nodesieve.core.fetcher",
+    "nodesieve.core.mihomo",
+    "nodesieve.core.router_validator",
+    "nodesieve.parsers.base",
+    "nodesieve.router.pusher",
+    "nodesieve.router.script_generator",
+    "nodesieve.ui.cli",
+    "nodesieve.ui.dashboard",
 )
 
 
