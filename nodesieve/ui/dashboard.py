@@ -12,7 +12,6 @@ import aiohttp
 
 from nodesieve.config import ConfigManager
 from nodesieve.constants import (
-    IS_TERMUX,
     PROJECT_ROOT,
     ROUTER_SCRIPT_FILE,
 )
@@ -292,9 +291,6 @@ class VPNDashboard:
             if dry_run:
                 log.info("[*] [DRY RUN] Existing configuration syntax checked. Skipping remote deployment.")
                 return True
-            if IS_TERMUX:
-                log.info("[*] Router deployment is not supported on Termux.")
-                return False
             log.info("[*] Deploying existing configuration to router...")
             return self.push_to_router()
 
@@ -330,10 +326,6 @@ class VPNDashboard:
 
         if dry_run:
             log.info(f"[+] [DRY RUN] Staged and verified {len(final_nodes)} nodes. Skipping remote router deployment.")
-            return True
-
-        if IS_TERMUX:
-            log.info(f"[+] Verified {len(final_nodes)} nodes. Remote deployment skipped on Termux.")
             return True
 
         # 6. Automated Deployment & Rollback Safety
@@ -380,7 +372,7 @@ class VPNDashboard:
             log.error("[-] Steer export unresolved: no proxy qualifies for the main pool. See the report; change preferences or check new proxies.")
             return False
         log.info(f"[+] Steer server list generated: {artifacts['servers_path']}")
-        if check_only or dry_run or IS_TERMUX:
+        if check_only or dry_run:
             return True
         return self.deploy_steer()
 

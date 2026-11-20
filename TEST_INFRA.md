@@ -24,6 +24,9 @@ The test suite is structured across 4 progressive tiers, plus existing foundatio
 ```
 tests/
 ├── Existing Tests (Foundational Baseline):
+│   ├── test_android.py                 # Android: node servers resolved through Android's resolver
+│   │                                   # and handed to Mihomo in its hosts section, also with the
+│   │                                   # real binary
 │   ├── test_concurrency.py             # AGENTS.md compliance, stream teardown, socket allocation
 │   ├── test_config.py                  # ConfigManager load/save, normalization
 │   ├── test_parsers.py                 # Protocol extraction (vless, trojan, ss, warp), naming

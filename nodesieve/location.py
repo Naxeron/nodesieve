@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 
@@ -30,6 +31,10 @@ DEPENDENCIES = ("bash", "jq", "curl")
 # strings where version 2 has objects.
 REPORT_VERSION = 2
 GEOIP_GROUP = "geoip"
+# Seconds each ipregion request may take through the node, its TLS handshakes included;
+# ipregion's own default. With two, good nodes failed on mobile data, where the first
+# requests through a freshly started node often take longer.
+REQUEST_TIMEOUT = 5
 
 
 def _consensus(counts):
@@ -127,6 +132,16 @@ def parse_ipregion(payload, families=None, real_ip=None):
     return evidence
 
 
+def _ipregion_error(stderr):
+    """The reason for a probe that ended without a report: ipregion's last error line."""
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", (stderr or b"").decode("utf-8", "replace"))
+    lines = ["".join(c for c in line if c.isprintable()).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return "ipregion failed without a report"
+    return "ipregion: " + lines[-1].removeprefix("Error: ")[:160]
+
+
 async def _stop_process_group(process, communication):
     """Bound cleanup of bash and all its curl/process-substitution children."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -158,7 +173,8 @@ async def probe_ipregion(script_path, proxy_address, families=None, real_ip=None
         return empty_location("failed", "Missing dependencies: " + ", ".join(missing), families)
     if not Path(script_path).is_file():
         return empty_location("failed", "ipregion script not found", families)
-    command = [shutil.which("bash"), str(script_path), "-p", proxy_address, "-j", "-g", GEOIP_GROUP, "-t", "2"]
+    command = [shutil.which("bash"), str(script_path), "-p", proxy_address, "-j", "-g", GEOIP_GROUP,
+               "-t", str(REQUEST_TIMEOUT)]
     # Always discover both; known reachable families remain required even when
     # the script cannot discover them. Never hide a failed IPv6 report.
     # Explicit SOCKS5 must not be bypassed by inherited no_proxy settings.
@@ -176,9 +192,12 @@ async def probe_ipregion(script_path, proxy_address, families=None, real_ip=None
         ))
         process = await asyncio.shield(launch)
         communication = asyncio.create_task(process.communicate())
-        stdout, _ = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout)
+        stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout)
         # ipregion's JSON is authoritative even if a final optional cleanup
         # function exits nonzero; malformed/absent output fails closed.
+        if process.returncode and not stdout.strip():
+            # It stopped before reporting, for example when no exit IP answered through the proxy.
+            return empty_location("failed", _ipregion_error(stderr), families)
         return parse_ipregion(stdout, families=families, real_ip=real_ip)
     except asyncio.CancelledError:
         # Do not lose the child if cancellation arrives during subprocess setup.

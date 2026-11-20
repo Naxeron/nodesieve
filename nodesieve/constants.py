@@ -1,6 +1,7 @@
 """Constants, default configuration, file paths, and YAML templates."""
 
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Set
 
@@ -23,6 +24,10 @@ SSH_ROUTER_SCRIPT_PATH = os.path.join(PROJECT_ROOT, "ssh_router.py")
 
 # Environment detection
 IS_TERMUX = "com.termux" in os.environ.get("PREFIX", "")
+# Python built for Android, such as Termux's: sys.platform is "android" from Python 3.13,
+# and only Android builds have sys.getandroidapilevel. A Linux distribution running in
+# proot on Android is not Android here: it has an /etc/resolv.conf of its own.
+IS_ANDROID = sys.platform == "android" or hasattr(sys, "getandroidapilevel")
 
 # Default Application Configuration
 DEFAULT_CONFIG: Dict[str, Any] = {
