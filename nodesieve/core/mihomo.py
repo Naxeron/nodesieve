@@ -3,6 +3,7 @@
 import asyncio
 import gzip
 import io
+import ipaddress
 import json
 import os
 import platform
@@ -12,12 +13,13 @@ import tempfile
 import threading
 import urllib.request
 import zipfile
-from typing import Optional, Set
+from typing import Dict, List, Optional, Set
 import yaml
 
 from nodesieve.constants import (
     CONFIG_YAML_TEMPLATE,
     CRASHED_LOG_FILE,
+    IS_ANDROID,
     MIHOMO_PATH,
     PROJECT_ROOT,
 )
@@ -139,6 +141,45 @@ class MihomoManager:
             sys.exit(1)
 
 
+async def android_resolved_hosts(server: Optional[str], timeout: float = 5.0) -> Dict[str, List[str]]:
+    """Addresses Android's resolver gives a node's server, as a Mihomo `hosts` entry.
+
+    Mihomo looks host names up through the servers in /etc/resolv.conf. Android has no
+    such file, so Mihomo asks 114.114.114.114 and 8.8.8.8 directly instead, bypassing
+    Android's own DNS (Private DNS, a VPN's DNS, the carrier's). Where those two can't be
+    reached, no node addressed by host name would connect, although the TCP check, which
+    resolves through Android, reached it. So on Android the server's name is resolved
+    here and handed to Mihomo. Elsewhere Mihomo uses the system's resolver itself.
+    """
+    if not IS_ANDROID or not isinstance(server, str):
+        return {}
+    host = server.strip().strip("[]")
+    if not host:
+        return {}
+    try:
+        ipaddress.ip_address(host)
+        return {}
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM), timeout
+        )
+    except Exception:
+        # Mihomo then tries its own resolvers, and the node fails as it would have.
+        return {}
+    addresses = [address for address in dict.fromkeys(str(info[4][0]) for info in infos) if "%" not in address]
+    return {host.lower(): addresses} if addresses else {}
+
+
+def render_test_config(port: int, node_file: str, hosts: Optional[Dict[str, List[str]]] = None) -> str:
+    """The Mihomo configuration of a single-node test instance."""
+    content = CONFIG_YAML_TEMPLATE.replace("{PORT}", str(port)).replace("{NODE_FILE}", node_file)
+    if hosts:
+        content += yaml.dump({"hosts": hosts}, allow_unicode=True, sort_keys=False)
+    return content
+
+
 class MihomoRunner:
     """Async context manager encapsulating isolated Mihomo subprocess lifecycles, configuration generation, and port management."""
 
@@ -191,6 +232,7 @@ class MihomoRunner:
                 proxy_dict = WarpScanner.generate_warp_proxy_dict(
                     host_w or "127.0.0.1", port_w or 2408, get_node_name(self.node), config=self.config
                 )
+                server = proxy_dict.get("server")
                 awg_yaml = generate_awg_proxy_yaml(proxy_dict)
                 with open(node_file, "w", encoding="utf-8") as f:
                     f.write("proxies:\n" + awg_yaml + "\n")
@@ -201,6 +243,7 @@ class MihomoRunner:
                     conf_path = conf_file
                 proxy_dict = parse_amnezia_conf(conf_path, proxy_name=get_node_name(self.node))
                 if proxy_dict:
+                    server = proxy_dict.get("server")
                     awg_yaml = generate_awg_proxy_yaml(proxy_dict)
                     with open(node_file, "w", encoding="utf-8") as f:
                         f.write("proxies:\n" + awg_yaml + "\n")
@@ -209,14 +252,16 @@ class MihomoRunner:
             else:
                 p_dict = node_url_to_mihomo_dict(self.node, use_mux=self.config.get("use_mux", True))
                 if p_dict:
+                    server = p_dict.get("server")
                     with open(node_file, "w", encoding="utf-8") as f:
                         f.write(yaml.dump({"proxies": [p_dict]}, allow_unicode=True, sort_keys=False))
                 else:
+                    server = extract_host_port(self.node)[0]
                     with open(node_file, "w", encoding="utf-8") as f:
                         f.write(self.node + "\n")
 
             # Generate main Mihomo YAML
-            config_content = CONFIG_YAML_TEMPLATE.replace("{PORT}", str(self.port)).replace("{NODE_FILE}", node_file)
+            config_content = render_test_config(self.port, node_file, await android_resolved_hosts(server))
             with open(config_file, "w", encoding="utf-8") as f:
                 f.write(config_content)
 

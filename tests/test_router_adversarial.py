@@ -20,6 +20,21 @@ ROUTER_SSH_PORT = 22
 ROUTER_REST_PORT = 9090
 
 
+def router_shell(router_tmp: str):
+    """exec_command for a stand-in router: runs the router's command on this machine.
+
+    The router stages the deployment script in its own /tmp; router_tmp stands in for
+    it. This machine's /tmp is shared, and Termux on Android can't write to it at all.
+    """
+    def exec_command(cmd, timeout=15.0):
+        res = subprocess.run(
+            cmd.replace("/tmp/", router_tmp + "/"), shell=True, capture_output=True, text=True
+        )
+        return res.returncode, res.stdout, res.stderr
+
+    return exec_command
+
+
 def is_live_ssh_available() -> bool:
     """Checks if live router SSH is reachable."""
     try:
@@ -268,36 +283,33 @@ class TestPusherAdversarial(unittest.TestCase):
             "/bin/sh /tmp/apply_to_router.sh; rc=$?; "
             "rm -f /tmp/apply_to_router.sh; exit $rc"
         )
-        with open("/tmp/apply_to_router.sh", "w") as f:
-            f.write("#!/bin/sh\nexit 42\n")
+        with tempfile.TemporaryDirectory() as router_tmp:
+            remote_script = os.path.join(router_tmp, "apply_to_router.sh")
+            with open(remote_script, "w") as f:
+                f.write("#!/bin/sh\nexit 42\n")
 
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        self.assertEqual(
-            res.returncode,
-            42,
-            "Non-zero exit code must be preserved after rm -f",
-        )
-        self.assertFalse(os.path.exists("/tmp/apply_to_router.sh"))
+            returncode, _, _ = router_shell(router_tmp)(cmd)
+            self.assertEqual(
+                returncode,
+                42,
+                "Non-zero exit code must be preserved after rm -f",
+            )
+            self.assertFalse(os.path.exists(remote_script))
 
     def test_push_to_router_detects_script_runtime_failure(self):
         """Tests that push_to_router() returns False on script failure."""
         mock_client = MagicMock()
         mock_client.stream_file_to_router.return_value = True
 
-        def realistic_shell_exec(cmd, timeout=15.0):
-            res = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True
-            )
-            return res.returncode, res.stdout, res.stderr
-
-        mock_client.exec_command.side_effect = realistic_shell_exec
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             script_path = os.path.join(tmp_dir, "apply_to_router.sh")
             with open(script_path, "w") as f:
                 f.write("#!/bin/sh\necho 'Service failed' >&2\nexit 1\n")
 
-            with open("/tmp/apply_to_router.sh", "w") as f:
+            router_tmp = os.path.join(tmp_dir, "router-tmp")
+            os.mkdir(router_tmp)
+            mock_client.exec_command.side_effect = router_shell(router_tmp)
+            with open(os.path.join(router_tmp, "apply_to_router.sh"), "w") as f:
                 f.write("#!/bin/sh\necho 'Service failed' >&2\nexit 1\n")
 
             with patch(
@@ -314,20 +326,15 @@ class TestPusherAdversarial(unittest.TestCase):
         mock_client = MagicMock()
         mock_client.stream_file_to_router.return_value = True
 
-        def realistic_shell_exec(cmd, timeout=15.0):
-            res = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True
-            )
-            return res.returncode, res.stdout, res.stderr
-
-        mock_client.exec_command.side_effect = realistic_shell_exec
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             script_path = os.path.join(tmp_dir, "apply_to_router.sh")
             with open(script_path, "w") as f:
                 f.write("#!/bin/sh\nif [ ; then fi\n")
 
-            with open("/tmp/apply_to_router.sh", "w") as f:
+            router_tmp = os.path.join(tmp_dir, "router-tmp")
+            os.mkdir(router_tmp)
+            mock_client.exec_command.side_effect = router_shell(router_tmp)
+            with open(os.path.join(router_tmp, "apply_to_router.sh"), "w") as f:
                 f.write("#!/bin/sh\nif [ ; then fi\n")
 
             with patch(

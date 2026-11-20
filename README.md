@@ -20,7 +20,8 @@ every option.
 
 ## Setup
 
-Developed and tested on Linux with Python 3.14.
+Developed and tested on Linux with Python 3.14. It also runs in Termux on Android,
+which needs a few extra steps: see [Termux (Android)](#termux-android).
 
 - **Mihomo.** Each node is checked through a local
   [Mihomo](https://github.com/MetaCubeX/mihomo) instance. If the project directory
@@ -50,6 +51,38 @@ Developed and tested on Linux with Python 3.14.
 
 The files a scan writes (`apply_to_router.sh`, `steer-output/`, `crashed_nodes.txt`,
 `sub_cache/`) contain proxy credentials and are ignored by git as well.
+
+### Termux (Android)
+
+In [Termux](https://termux.dev), pip can't build psutil, because Python for Android
+reports its platform as `android`, and paramiko's cryptography, bcrypt and PyNaCl have no
+Android wheels. Install them from Termux's packages before the requirements:
+
+```sh
+pkg install git python python-psutil python-cryptography python-bcrypt python-pynacl curl jq
+git clone https://github.com/Naxeron/nodesieve ~/nodesieve
+cd ~/nodesieve
+pip install -r requirements.txt
+```
+
+- **Keep the project in Termux's home directory.** Shared storage (`~/storage/shared`)
+  is mounted `noexec`, so Mihomo can't run from there.
+- **Turn off Android's child process limit.** Android 12 and newer kill child processes
+  when more than 32 run across all apps, the oldest first, which can be Termux's shell
+  and nodesieve itself. A Steer scan runs far more (six ipregion probes at once, each
+  with up to 16 parallel jobs), and a Mihomo scan with its 24 workers comes close. On
+  Android 14 and newer, turn on Developer options → *Disable child process
+  restrictions*. On Android 12L and 13, run
+  `adb shell "settings put global settings_enable_monitor_phantom_procs false"` from a
+  computer. For Android 12, see
+  [these notes by a Termux maintainer](https://github.com/agnostic-apollo/Android-Docs/blob/master/en/docs/apps/processes/phantom-cached-and-empty-processes.md#how-to-disable-the-phantom-processes-killing).
+- **DNS.** Mihomo finds no `/etc/resolv.conf` on Android and would look host names up
+  through 114.114.114.114 and 8.8.8.8 itself. So on Android, nodesieve resolves each
+  node's server through Android's resolver and passes the addresses to Mihomo. Private
+  DNS, a VPN's DNS, and networks that block other DNS servers then work as they do for
+  every other app.
+- **Router validation and deployment** work as on a computer when the phone can reach
+  the router, for example over the router's Wi-Fi.
 
 ## What is checked
 
@@ -134,8 +167,9 @@ not apply to Steer.
 
 The scan shows the winning country, agreement percentage, and vote count for
 each node. Missing/failed reports do not vote. GeoIP checks run through each
-node's proxy with six concurrent ipregion processes and a three-minute limit
-per probe; a timeout or missing dependency leaves a node's location unknown.
+node's proxy with six concurrent ipregion processes, five seconds for each of
+their requests and a three-minute limit per probe; a timeout or missing
+dependency leaves a node's location unknown.
 The required tools are Bash 4.4 or newer, curl, and jq. The scanner does not
 install packages or prompt while scanning. The bundled script must be an
 ipregion release that prints JSON report version 2.

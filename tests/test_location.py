@@ -160,12 +160,32 @@ class TestLocationSubprocess(unittest.IsolatedAsyncioTestCase):
             evidence = await probe_ipregion("/tmp/ipregion.sh", "127.0.0.1:23456", families=["ipv4"])
         self.assertEqual(evidence["country"], "DE")
         self.assertEqual(spawn.call_args.args, (
-            "/usr/bin/bash", "/tmp/ipregion.sh", "-p", "127.0.0.1:23456", "-j", "-g", "geoip", "-t", "2"))
+            "/usr/bin/bash", "/tmp/ipregion.sh", "-p", "127.0.0.1:23456", "-j", "-g", "geoip", "-t", "5"))
         self.assertNotIn("-4", spawn.call_args.args)
         self.assertNotIn("-6", spawn.call_args.args)
         self.assertTrue(spawn.call_args.kwargs["start_new_session"])
         self.assertEqual(spawn.call_args.kwargs["stdin"], asyncio.subprocess.DEVNULL)
         self.assertEqual(spawn.call_args.kwargs["env"]["NO_PROXY"], "")
+
+    async def test_probe_that_ends_without_a_report_gives_ipregions_reason(self):
+        process = MagicMock(pid=54321, returncode=1)
+        process.communicate = AsyncMock(return_value=(
+            b"", b"\x1b[31mError: failed to detect an external IP address, check the network connection\x1b[0m\n"))
+        with patch("nodesieve.location.shutil.which", return_value="/usr/bin/tool"), \
+                patch("nodesieve.location.Path.is_file", return_value=True), \
+                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)):
+            evidence = await probe_ipregion("/tmp/ipregion.sh", "127.0.0.1:23456", families=["ipv4"])
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["reason"],
+                         "ipregion: failed to detect an external IP address, check the network connection")
+        self.assertEqual(evidence["tested_families"], ["ipv4"])
+
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        with patch("nodesieve.location.shutil.which", return_value="/usr/bin/tool"), \
+                patch("nodesieve.location.Path.is_file", return_value=True), \
+                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)):
+            evidence = await probe_ipregion("/tmp/ipregion.sh", "127.0.0.1:23456")
+        self.assertEqual(evidence["reason"], "ipregion failed without a report")
 
     async def test_missing_dependencies_do_not_launch_installer(self):
         with patch("nodesieve.location.shutil.which", return_value=None), \
