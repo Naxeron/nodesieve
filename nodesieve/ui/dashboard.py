@@ -17,7 +17,7 @@ from nodesieve.constants import (
 )
 from nodesieve.core.fetcher import NodeFetcher
 from nodesieve.core.limits import ResourceLimits
-from nodesieve.core.mihomo import MihomoManager
+from nodesieve.core.mihomo import MihomoManager, NodeEndpoint, run_in_batches
 from nodesieve.core.tester import NodeTester
 from nodesieve.feed import feed_status, write_feed
 from nodesieve.logging import ErrorTracker, log, update_progress
@@ -128,7 +128,10 @@ class VPNDashboard:
 
         log.info(f"[*] Survived TCP ping: {tcp_survivors_count}")
         log.info(f"[*] System has {free_mem_mb:.0f}MB free memory. HTTP workers set to {self.config['workers']}.")
-        log.info(f"[*] Starting concurrent IP checks with {self.config['workers']} workers...\n")
+        num_workers = min(self.config["workers"], tcp_survivors_count)
+        per_instance, instances = ResourceLimits.mihomo_instances(num_workers)
+        log.info(f"[*] Starting concurrent IP checks with {num_workers} workers, through up to {instances} "
+                 f"Mihomo instances of {per_instance} nodes each...\n")
 
         MihomoManager.setup()
 
@@ -137,30 +140,18 @@ class VPNDashboard:
         start_time = time.time()
         tester = NodeTester(self.config, tcp_survivors_count, real_ip)
 
-        queue = asyncio.Queue()
-        for i, node in enumerate(tcp_survivors):
-            queue.put_nowait((i + 1, node))
-
-        async def http_worker():
+        def record(idx: int, node: str, res: Any) -> None:
             nonlocal completed
-            while True:
-                try:
-                    idx, node = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                try:
-                    res = await tester.test_node_full(idx, node)
-                    if res:
-                        supported_nodes.append(res)
-                except Exception as e:
-                    ErrorTracker.record_error("HTTP Worker", e)
-                finally:
-                    completed += 1
-                    update_progress(completed, tcp_survivors_count, start_time)
+            if res:
+                supported_nodes.append(res)
+            completed += 1
+            update_progress(completed, tcp_survivors_count, start_time)
 
-        num_workers = min(self.config["workers"], tcp_survivors_count)
-        tasks = [asyncio.create_task(http_worker()) for _ in range(num_workers)]
-        await asyncio.gather(*tasks)
+        await run_in_batches(
+            list(enumerate(tcp_survivors, 1)), tester.check_links, tester.test_node_full, record,
+            config=self.config, workers=num_workers, total_nodes=tcp_survivors_count,
+            temp_prefix="mihomo_", error_context="HTTP Worker",
+        )
         print()
 
         log.info("\n[*] Phase 1 testing complete.")
@@ -230,29 +221,21 @@ class VPNDashboard:
         start_time = time.time()
         active_tester = tester or NodeTester(self.config, len(clean_node_strs))
 
-        queue = asyncio.Queue()
-        for i, n in enumerate(clean_node_strs):
-            queue.put_nowait((i + 1, n))
-
-        async def speed_worker():
+        def record(idx: int, node: str, res: Any) -> None:
             nonlocal completed
-            while True:
-                try:
-                    idx, node = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                try:
-                    res = await active_tester.speedtest_node(idx, node, speedtest_timeout)
-                    if res:
-                        speed_tested_nodes.append(res)
-                except Exception as e:
-                    ErrorTracker.record_error("Speed Worker", e)
-                finally:
-                    completed += 1
-                    update_progress(completed, len(clean_node_strs), start_time)
+            if res:
+                speed_tested_nodes.append(res)
+            completed += 1
+            update_progress(completed, len(clean_node_strs), start_time)
 
-        tasks = [asyncio.create_task(speed_worker()) for _ in range(speed_workers)]
-        await asyncio.gather(*tasks)
+        async def speedtest(idx: int, node: str, endpoint: Optional[NodeEndpoint]) -> Any:
+            return await active_tester.speedtest_node(idx, node, speedtest_timeout, endpoint)
+
+        await run_in_batches(
+            list(enumerate(clean_node_strs, 1)), active_tester.speedtest_links, speedtest, record,
+            config=self.config, workers=speed_workers, total_nodes=active_tester.total_nodes,
+            temp_prefix="speed_mihomo_", error_context="Speed Worker",
+        )
         print()
 
         log.info("\n[*] Speedtesting complete.")

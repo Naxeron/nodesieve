@@ -2,15 +2,14 @@
 
 Mihomo finds no /etc/resolv.conf on Android and then asks 114.114.114.114 and 8.8.8.8
 itself, bypassing Android's DNS. So on Android nodesieve resolves the server through
-Android's resolver and passes the addresses to Mihomo in its `hosts` section.
+Android's resolver and passes the addresses to Mihomo in its `hosts` section: one section
+for every node a Mihomo serves.
 """
 
 import asyncio
 import os
 import socket
-import subprocess
 import threading
-import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,7 +17,13 @@ import yaml
 
 from nodesieve.constants import MIHOMO_PATH
 from nodesieve.core import mihomo
-from nodesieve.core.mihomo import MihomoManager, MihomoRunner, android_resolved_hosts, render_test_config
+from nodesieve.core.mihomo import (
+    BatchNode,
+    MihomoBatch,
+    MihomoRunner,
+    android_resolved_hosts,
+    render_batch_config,
+)
 
 NODE = "vless://11111111-2222-3333-4444-555555555555@Node.Example:443?security=tls&sni=node.example&type=tcp#Test"
 
@@ -77,16 +82,58 @@ def test_android_drops_link_local_addresses_with_a_scope(android):
         assert asyncio.run(android_resolved_hosts("node.example")) == {"node.example": ["203.0.113.7"]}
 
 
-def test_test_config_gains_a_hosts_section_only_when_given_one():
-    plain = yaml.safe_load(render_test_config(7890, "/work/node.txt"))
+def test_batch_config_gains_a_hosts_section_only_when_given_one():
+    proxy = {"name": "node-0", "type": "http", "server": "node.example", "port": 8080}
+    plain = yaml.safe_load(render_batch_config([(proxy, 7890)]))
     assert "hosts" not in plain
-    assert plain["mixed-port"] == 7890
-    assert plain["proxy-providers"]["test_sub"]["path"] == "/work/node.txt"
+    assert plain["listeners"] == [
+        {"name": "in-node-0", "type": "mixed", "listen": "127.0.0.1", "port": 7890, "proxy": "node-0"},
+    ]
 
     hosts = {"node.example": ["203.0.113.7", "2001:0:0:1"]}
-    with_hosts = yaml.safe_load(render_test_config(7890, "/work/node.txt", hosts))
+    with_hosts = yaml.safe_load(render_batch_config([(proxy, 7890)], hosts))
     assert with_hosts["hosts"] == hosts
     assert {key: value for key, value in with_hosts.items() if key != "hosts"} == plain
+
+
+def test_batch_on_android_hands_every_servers_addresses_to_its_mihomo(android):
+    """The nodes of one Mihomo share its hosts section: each server once, with all its addresses."""
+    answers = {"a.example": ("203.0.113.1", "2001:db8::1"), "b.example": ("203.0.113.2",)}
+    asked = []
+
+    async def resolve(self, host, port, **kwargs):
+        asked.append(host)
+        return addrinfo(*answers[host.lower()])
+
+    written = {}
+
+    async def launch(*command, **kwargs):
+        with open(command[command.index("-f") + 1], encoding="utf-8") as config:
+            written["config"] = yaml.safe_load(config)
+        raise OSError("not starting Mihomo in this test")
+
+    def link(server, tag):
+        return f"vless://11111111-2222-3333-4444-555555555555@{server}:443?security=tls&type=tcp#{tag}"
+
+    nodes = [BatchNode(link("A.example", "one"), mux_link=link("A.example", "one-mux")),
+             BatchNode(link("b.example", "two")), BatchNode(link("a.example", "three")),
+             BatchNode(link("203.0.113.9", "by-address"))]
+
+    async def run():
+        async with MihomoBatch(nodes, {"use_mux": False}) as batch:
+            return batch.endpoints
+
+    with patch("asyncio.base_events.BaseEventLoop.getaddrinfo", new=resolve), \
+            patch.object(mihomo.asyncio, "create_subprocess_exec", new=launch):
+        endpoints = asyncio.run(run())
+    assert written["config"]["hosts"] == {
+        "a.example": ["203.0.113.1", "2001:db8::1"], "b.example": ["203.0.113.2"],
+    }
+    assert sorted(asked) == ["A.example", "a.example", "b.example"]
+    # A listener for each node and for the mux twin, besides the one telling when Mihomo is ready.
+    assert len([listener for listener in written["config"]["listeners"] if listener["proxy"].startswith("node-")]) == 5
+    # Mihomo could not be run at all: every node is told why.
+    assert all(isinstance(endpoint.exception, OSError) for endpoint in endpoints)
 
 
 def test_runner_on_android_hands_the_resolved_server_to_mihomo(android):
@@ -107,8 +154,8 @@ def test_runner_on_android_hands_the_resolved_server_to_mihomo(android):
     assert written["config"]["hosts"] == {"node.example": ["203.0.113.7"]}
 
 
-def test_mihomo_reaches_a_node_through_its_hosts_entry(tmp_path):
-    """The real binary connects to a server whose name only the hosts section knows."""
+def test_mihomo_reaches_a_node_through_its_hosts_entry(android):
+    """The real binary connects to a server whose name only Android's resolver knows."""
     if not (os.path.isfile(MIHOMO_PATH) and os.access(MIHOMO_PATH, os.X_OK)):
         pytest.skip(f"Mihomo binary not executable at {MIHOMO_PATH}")
 
@@ -131,37 +178,26 @@ def test_mihomo_reaches_a_node_through_its_hosts_entry(tmp_path):
     accepting.start()
 
     # .invalid never resolves through DNS, so only the hosts entry can lead Mihomo there.
-    node_file = tmp_path / "node.txt"
-    node_file.write_text(yaml.dump({"proxies": [{
-        "name": "node", "type": "http", "server": "upstream.nodesieve.invalid",
-        "port": upstream.getsockname()[1],
-    }]}))
-    port = MihomoManager.get_free_port()
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text(render_test_config(port, str(node_file), {"upstream.nodesieve.invalid": ["127.0.0.1"]}))
-    process = subprocess.Popen(
-        [MIHOMO_PATH, "-d", str(tmp_path), "-f", str(config_file)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    proxy = {"type": "http", "server": "upstream.nodesieve.invalid", "port": upstream.getsockname()[1]}
+
+    async def resolve(self, host, port, **kwargs):
+        assert host == "upstream.nodesieve.invalid"
+        return addrinfo("127.0.0.1")
+
+    async def run():
+        async with MihomoBatch([BatchNode("http://upstream.nodesieve.invalid#Node", idx=1, total=1)], {}) as batch:
+            endpoint = batch.endpoints[0]
+            assert endpoint.error is None
+            reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+            writer.write(b"CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid:443\r\n\r\n")
+            await writer.drain()
+            await asyncio.get_running_loop().run_in_executor(None, accepting.join, 10)
+            writer.close()
+
     try:
-        deadline = time.monotonic() + 15
-        while True:
-            try:
-                client = socket.create_connection(("127.0.0.1", port), timeout=1)
-                break
-            except OSError:
-                if process.poll() is not None or time.monotonic() > deadline:
-                    pytest.fail("Mihomo did not open its port")
-                time.sleep(0.05)
-        with client:
-            client.sendall(b"CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid:443\r\n\r\n")
-            accepting.join(10)
+        with patch("asyncio.base_events.BaseEventLoop.getaddrinfo", new=resolve), \
+                patch.object(mihomo, "mihomo_proxy", return_value=proxy):
+            asyncio.run(run())
         assert received and received[0].startswith(b"CONNECT example.invalid:443 ")
     finally:
-        process.terminate()
-        try:
-            process.wait(5)
-        except subprocess.TimeoutExpired:
-            process.kill()
         upstream.close()
-        MihomoManager.release_port(port)

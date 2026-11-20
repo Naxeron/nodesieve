@@ -25,10 +25,11 @@ every option.
 Developed and tested on Linux with Python 3.14. It also runs in Termux on Android,
 which needs a few extra steps: see [Termux (Android)](#termux-android).
 
-- **Mihomo.** Each node is checked through a local
-  [Mihomo](https://github.com/MetaCubeX/mihomo) instance. If the project directory
-  has no `mihomo` binary, the first check downloads the latest alpha build for this
-  platform from Mihomo's GitHub releases.
+- **Mihomo.** Nodes are checked through local
+  [Mihomo](https://github.com/MetaCubeX/mihomo) instances, each serving up to 32 of
+  them (see [Local Mihomo instances](#local-mihomo-instances)). If the project
+  directory has no `mihomo` binary, the first check downloads the latest alpha build
+  for this platform from Mihomo's GitHub releases.
 - **Settings** are stored in `nodesieve_config.json` in the project directory. The
   file is created the first time settings are saved, for example by `--add-sub`, and
   git ignores it because it holds subscription links and router credentials.
@@ -70,12 +71,14 @@ pip install -r requirements.txt
 
 - **Keep the project in Termux's home directory.** Shared storage (`~/storage/shared`)
   is mounted `noexec`, so Mihomo can't run from there.
-- **Turn off Android's child process limit.** Android 12 and newer kill child processes
-  when more than 32 run across all apps, the oldest first, which can be Termux's shell
-  and nodesieve itself. A Steer scan runs far more (six ipregion probes at once, each
-  with up to 16 parallel jobs), and a Mihomo scan with its 24 workers comes close. On
-  Android 14 and newer, turn on Developer options → *Disable child process
-  restrictions*. On Android 12L and 13, run
+- **Android's child process limit.** Android 12 and newer kill child processes when
+  more than 32 run across all apps, the oldest first, which can be Termux's shell and
+  nodesieve itself. A Mihomo scan stays well under it: it checks up to 64 nodes at once
+  through at most three Mihomo processes. ipregion does not: a Steer scan, and a Mihomo
+  scan with `enable_loc_ranking`, runs six ipregion probes at once, each with up to 16
+  parallel jobs of its own. For those scans, turn the limit off. On Android 14 and
+  newer, turn on Developer options → *Disable child process restrictions*. On Android
+  12L and 13, run
   `adb shell "settings put global settings_enable_monitor_phantom_procs false"` from a
   computer. For Android 12, see
   [these notes by a Termux maintainer](https://github.com/agnostic-apollo/Android-Docs/blob/master/en/docs/apps/processes/phantom-cached-and-empty-processes.md#how-to-disable-the-phantom-processes-killing).
@@ -100,12 +103,12 @@ pip install -r requirements.txt
 Every node from the configured subscriptions goes through the same IP check:
 
 1. **TCP reachability.** A raw connection to the node's host and port.
-2. **Exit IP.** The node is started in a temporary local Mihomo instance and asked
-   for its exit address through Cloudflare's trace endpoint, over IPv4 and IPv6
-   separately. This yields the exit IP, its country and the latency. A node is
-   dropped when its exit address is this computer's own address (an IP leak) and,
-   for the Mihomo target, when it has no outbound connectivity at all. `ip_mode`
-   can require one or both families.
+2. **Exit IP.** The node is reached through a local port of its own on a temporary
+   Mihomo instance and asked for its exit address through Cloudflare's trace
+   endpoint, over IPv4 and IPv6 separately. This yields the exit IP, its country and
+   the latency. A node is dropped when its exit address is this computer's own
+   address (an IP leak) and, for the Mihomo target, when it has no outbound
+   connectivity at all. `ip_mode` can require one or both families.
 3. **Country.** For the Mihomo target, exits in RU, BY, CN, IR, KP, SY and CU are
    always rejected and `--countries US,DE` restricts the rest to an allowlist. For
    Steer, the main pool's own location policy decides instead (below).
@@ -143,6 +146,30 @@ multiplexing. One that qualifies is then asked for a single request through it a
 keeps multiplexing, in the speedtest and on the router, only if it answers; the scan
 reports how many nodes do. Set `use_mux` to `false` in `nodesieve_config.json` to
 skip that request. Steer connects with its own core, so a Steer scan never asks.
+
+### Local Mihomo instances
+
+One Mihomo instance serves up to 32 nodes. Each node is a proxy of its own in the
+instance's configuration and has a local port that uses only that node: an HTTP and
+SOCKS5 listener on 127.0.0.1. The instance refuses anything else, so no check goes out
+directly. A node whose multiplexing is to be tried gets a second port on the same
+instance, for the node with multiplexing.
+
+A scan checks as many nodes at once as memory allows, at most 256, or 64 on Android. It
+counts 8 MB for each node (`mem_per_worker`) and 24 MB for each instance, and leaves
+500 MB free. It runs one instance for every 32 nodes plus one, so that a new batch can
+start while the last nodes of another are still being checked. A router with 1 GB of
+RAM, about 790 MB of it available, checks 30 nodes at once through two instances.
+`workers` (or `--workers`) sets a lower number. The speedtest measures up to 8 nodes at
+once, through one instance.
+
+- **A node Mihomo refuses.** Mihomo refuses a whole configuration over one proxy it
+  can't use. Such a node is set aside with Mihomo's reason, shown with its number and
+  written to `crashed_nodes.txt`, and the other nodes of its batch start without it.
+- **A node that crashes Mihomo.** When an instance exits in the middle of the checks,
+  the nodes it was still checking are checked again, each with an instance of its own.
+  The node that crashes Mihomo again is recorded in `crashed_nodes.txt`; the others are
+  checked as usual.
 
 ### Mihomo target
 
@@ -353,6 +380,17 @@ deployed to Forkozz (NetShift) with a separate route for each. Both are gone:
   leave the main servers untouched.
 - The Mihomo router configuration no longer opens the extra verification listener
   on port 7891, and `--router-test-port` no longer exists.
+
+**Nodes share local Mihomo instances**, up to 32 each, instead of one instance per node
+(see [Local Mihomo instances](#local-mihomo-instances)):
+
+- A scan runs a few Mihomo processes instead of one for every node it checks at once,
+  so it fits a router's memory. `mem_per_worker` now counts only a node's share; each
+  instance is counted on its own.
+- On Android a Mihomo scan checks up to 64 nodes at once instead of 24.
+- A node whose link Mihomo can't use is recorded in `crashed_nodes.txt` with Mihomo's
+  reason. It used to be checked over a direct connection, Mihomo's fallback for a proxy
+  list it can't load, and dropped as an IP leak.
 
 See [PROJECT.md](PROJECT.md) for pipeline
 architecture and [TEST_INFRA.md](TEST_INFRA.md) for testing details.

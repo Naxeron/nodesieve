@@ -11,7 +11,7 @@ website is probed — through a dual-stage, router-representative pipeline:
 [Phase 0: TCP Reachability Filter] (Local rapid pre-filter: raw TCP connect, timeout 1.5s)
        │
        ▼
-[Stage 1: Local IP Check] (Local ephemeral Mihomo instance per node)
+[Stage 1: Local IP Check] (Local Mihomo instances, up to 32 nodes each, a listener per node)
        ├── Exit IPv4/IPv6, country and latency via Cloudflare trace
        ├── Drop: no outbound connectivity, exit IP equal to this host's IP (leak)
        ├── Mihomo target: reject RU/BY/CN/IR/KP/SY/CU exits, apply allowed_countries
@@ -91,8 +91,17 @@ identifiers before deploying a new configuration.
 ### `NodeTester` ↔ `dashboard.py`
 - `class NodeTester`:
   - `async def async_check_tcp_node(node, timeout=1.5) -> Optional[str]`: Phase 0 TCP reachability.
-  - `async def test_node_full(idx, node) -> Optional[Tuple[str, float, str]]`: Stage 1 IP check. Returns `(relabelled_node, latency_ms, tested_node)` or `None`; the outcome, including a drop reason, is recorded in `node_metadata`. The node is checked without multiplexing; when `use_mux` applies to it and its server does not answer through sing-mux, the relabelled link is marked `smux=0`, which `node_url_to_mihomo_dict` reads as "no multiplexing" for the speedtest, router validation and deployment.
-  - `async def speedtest_node(idx, node, timeout) -> Optional[Tuple[str, float, float]]`: Returns `(relabelled_node, bytes_per_second, location_score)`.
+  - `def check_links(node) -> Optional[Tuple[str, Optional[str]]]`: What the IP check needs a local Mihomo to serve for a node: the link it is checked with (without multiplexing where `use_mux` applies) and the same node with multiplexing for the probe, or `None` for no probe (Steer, or no multiplexing). `None` instead of the pair for a node turned away before any Mihomo is needed.
+  - `async def test_node_full(idx, node, endpoint=None) -> Optional[Tuple[str, float, str]]`: Stage 1 IP check through `endpoint`, the node's listener on a shared Mihomo, or through a Mihomo of its own when there is none. Returns `(relabelled_node, latency_ms, tested_node)` or `None`; the outcome, including a drop reason, is recorded in `node_metadata`. The node is checked without multiplexing; when `use_mux` applies to it and its server does not answer through sing-mux, the relabelled link is marked `smux=0`, which `node_url_to_mihomo_dict` reads as "no multiplexing" for the speedtest, router validation and deployment. Before it puts a failure down to the node it calls `ensure_alive()`, which raises `MihomoInstanceLost` with `retry` when a shared Mihomo has exited; the node is then to be checked again alone.
+  - `def speedtest_links(node)` / `async def speedtest_node(idx, node, timeout, endpoint=None) -> Optional[Tuple[str, float, float]]`: The same for the speedtest. Returns `(relabelled_node, bytes_per_second, location_score)`.
+
+### `mihomo.py` ↔ `tester.py` / `dashboard.py`
+- `class MihomoBatch(nodes: List[BatchNode], config, temp_prefix)`: async context manager; one Mihomo serving `BatchNode(link, mux_link=None, idx=0, total=0)` each through a mixed listener on 127.0.0.1 pinned to the node's proxy, with `MATCH,REJECT` for anything else (`render_batch_config`). On Android the servers' addresses from Android's resolver go into one `hosts` section. `endpoints[i]` is node i's `NodeEndpoint` (`port`, `proxy_url`, `error`, `exception`, `mux`, `shared`, `async ensure_alive()`).
+  - Start: an extra listener, pinned to an HTTP proxy that leads back to nodesieve, tells when Mihomo relays: it opens listeners before it relays and closes what arrives in between. Mihomo's output goes to a log in the instance's directory, read on failure.
+  - A proxy Mihomo refuses (`Parse config error: proxy N: …`) is set aside with that reason and recorded with `record_crash` (`crashed_nodes.txt`, and on screen for a numbered node); the rest start without it. An exit that names no proxy halves the batch until the node is found. A listener whose port was taken meanwhile gets new ports (twice). A Mihomo that runs but never relays fails the batch's nodes without halving. A link without a Mihomo proxy (an unreadable AWG file, WARP without `warp_private_key`) gets the error and starts nothing.
+- `class MihomoRunner(node, config, temp_prefix, node_idx, total_nodes, endpoint=None)`: A node's proxy for one check (`port`, `proxy_url`, `ensure_alive()`). With an endpoint it uses the batch's Mihomo and leaves it running; without, it starts a one-node batch and stops it on exit.
+- `async def run_in_batches(jobs, links, check, on_result, *, config, workers, total_nodes, temp_prefix, error_context)`: Runs `check(idx, node, endpoint)` for each `(idx, node)` job, `workers` at once, through `MihomoBatch`es of up to `NODES_PER_INSTANCE` consecutive jobs and at most `ResourceLimits.mihomo_instances(workers)` of them at once. `links` is `check_links` or `speedtest_links`. `on_result(idx, node, result)` gets each job's result once, `None` if the check raised. Jobs whose check raised `MihomoInstanceLost` with `retry` are checked again, each in a batch of its own.
+- `ResourceLimits` (`core/limits.py`): `get_max_safe_workers(config)` budgets `mem_per_worker` (8 MB) per node and `MIHOMO_INSTANCE_MB` (24) per instance, leaving 500 MB, at most 256 nodes (64 on Android); `mihomo_instances(workers) -> (nodes_per_instance, instances_at_once)` is `(min(32, workers), ceil(workers / that) + 1)`.
 
 ### `RouterClient` ↔ `RouterValidator` / `pusher.py`
 - `class RouterClient`:
@@ -137,7 +146,8 @@ nodesieve/
 ├── location.py                      # ipregion GeoIP consensus through a node's proxy
 ├── geo.py                           # Country name and IP country lookups
 ├── core/
-│   ├── mihomo.py                    # Local Mihomo subprocess runner (ephemeral ports)
+│   ├── limits.py                    # Nodes checked at once, Mihomo instances, file descriptor limit
+│   ├── mihomo.py                    # Local Mihomo instances: a batch of nodes each, a listener per node; run_in_batches
 │   ├── router_validator.py          # Staged router verification (Stage 2)
 │   └── tester.py                    # Node tester: TCP ping, IP check, speedtest
 ├── router/

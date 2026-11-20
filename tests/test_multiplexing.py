@@ -52,6 +52,30 @@ class _Instance:
     async def __aexit__(self, *exc):
         return False
 
+    async def ensure_alive(self):
+        """These instances never exit by themselves."""
+
+
+class _Endpoint:
+    """A link's listener on a shared Mihomo, as MihomoBatch hands it out."""
+
+    def __init__(self, link):
+        self.link, self.mux = link, None
+
+
+class _Batch:
+    def __init__(self, endpoints):
+        self.endpoints = endpoints
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def exited(self):
+        return []
+
 
 class _Servers:
     """Stands in for Mihomo and the servers behind the nodes.
@@ -64,10 +88,22 @@ class _Servers:
         self.dead = set()            # hosts whose server answers nothing
         self.ipv6_only = set()       # hosts whose exit has no IPv4
         self.mux_crashes = set()     # hosts Mihomo cannot start a multiplexed instance for
-        self.started = []            # (host, multiplexed) of every instance, in order
+        self.started = []            # (host, multiplexed) of every instance a check used, in order
         self.mux_traces = []         # trace URL of every request through a multiplexed instance
+        self.batches = []            # (link, mux link) of each node, per shared Mihomo of a scan
 
-    def mihomo(self, node, config, **_):
+    def batch(self, nodes, config, temp_prefix="mihomo_"):
+        self.batches.append([(node.link, node.mux_link) for node in nodes])
+        endpoints = []
+        for node in nodes:
+            endpoint = _Endpoint(node.link)
+            endpoint.mux = _Endpoint(node.mux_link) if node.mux_link else None
+            endpoints.append(endpoint)
+        return _Batch(endpoints)
+
+    def mihomo(self, node, config, endpoint=None, **_):
+        # A check uses the listener of the very link it asked the batch to serve.
+        assert endpoint is None or endpoint.link == node
         proxy = node_url_to_mihomo_dict(node, use_mux=config.get("use_mux", True))
         host, mux = proxy["server"], "smux" in proxy
         self.started.append((host, mux))
@@ -88,6 +124,7 @@ class _Servers:
 def servers():
     farm = _Servers()
     with patch("nodesieve.core.tester.MihomoRunner", farm.mihomo), \
+            patch("nodesieve.core.mihomo.MihomoBatch", farm.batch), \
             patch.object(NodeTester, "_fetch_ip", farm.trace), \
             patch("nodesieve.core.tester.GeolocationService.get_country_name",
                   AsyncMock(return_value="United States")):
@@ -227,6 +264,14 @@ def test_scan_reports_multiplexing_and_deploys_it_only_where_it_works(servers, c
         assert asyncio.run(dashboard.run_pipeline_async(check_only=True))
 
     assert "Multiplexing: 1 of 2 eligible working nodes support it; the rest are used without it." in caplog.text
+    # Each node is served, with its multiplexed twin for the probe, by a Mihomo shared by up
+    # to `workers` nodes; Vision gets no twin.
+    assert sorted(entry for batch in servers.batches for entry in batch) == sorted([
+        (without_mux(ws_node("mux.example")), ws_node("mux.example")),
+        (without_mux(ws_node("plain.example")), ws_node("plain.example")),
+        (VISION, None),
+    ])
+    assert max(len(batch) for batch in servers.batches) == 2
     script = (Path(dashboard_module.PROJECT_ROOT) / "apply_to_router.sh").read_text(encoding="utf-8")
     provider = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d > /etc/mihomo/proxy-providers/sub\.yaml\.tmp", script)
     proxies = yaml.safe_load(base64.b64decode(provider.group(1)))["proxies"]
