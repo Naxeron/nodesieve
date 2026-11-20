@@ -20,18 +20,18 @@ import pytest
 import yaml
 
 from nodesieve.constants import MIHOMO_PATH
-from nodesieve.core import limits, mihomo
-from nodesieve.core.limits import ResourceLimits
-from nodesieve.core.mihomo import (
+from nodesieve.core import batch as core_batch, limits, mihomo
+from nodesieve.core.batch import (
     BatchNode,
-    MihomoBatch,
-    MihomoInstanceLost,
-    MihomoManager,
-    MihomoRunner,
+    CoreBatch,
+    CoreInstanceLost,
+    CoreRunner,
+    PortManager,
     run_in_batches,
 )
+from nodesieve.core.limits import ResourceLimits
 
-CONFIG = {"use_mux": False}
+CONFIG = {"use_mux": False, "core": "mihomo"}
 PASSWORD = "nodesieve-test-password"
 
 FAKE_MIHOMO = r'''
@@ -82,10 +82,13 @@ async def ready(reader, writer):
     await reader.readuntil(b"\r\n\r\n")
     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
     if relaying:
+        # Relays the probe's line to the ready proxy and its answer back.
         proxy = by_name["nodesieve-ready"]
         far_reader, far_writer = await asyncio.open_connection(proxy["server"], proxy["port"])
         far_writer.write(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\n\r\n")
         await far_reader.readuntil(b"\r\n\r\n")
+        far_writer.write(await reader.readline())
+        await far_writer.drain()
         writer.write(await far_reader.read(4096))
         far_writer.close()
     await writer.drain()
@@ -129,7 +132,7 @@ def fake_mihomo(tmp_path, monkeypatch):
         starts.append(command)
         return await launch(*command, **kwargs)
 
-    monkeypatch.setattr(mihomo.asyncio, "create_subprocess_exec", counted)
+    monkeypatch.setattr(core_batch.asyncio, "create_subprocess_exec", counted)
     return starts
 
 
@@ -144,14 +147,14 @@ def ss(server, tag, cipher="aes-128-gcm", port=8388, password=PASSWORD):
 
 
 def crash_log():
-    path = Path(mihomo.PROJECT_ROOT) / "crashed_nodes.txt"
+    path = Path(core_batch.PROJECT_ROOT) / "crashed_nodes.txt"
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
 def serve(nodes, inspect, config=CONFIG):
     """Starts a batch for these nodes and returns what inspect(batch) finds while it runs."""
     async def run():
-        async with MihomoBatch(nodes, config) as batch:
+        async with CoreBatch(nodes, config) as batch:
             return await inspect(batch)
     return asyncio.run(run())
 
@@ -183,7 +186,7 @@ def test_nodes_of_a_batch_share_one_mihomo(fake_mihomo):
         ports = [endpoint.port for endpoint in batch.endpoints]
         assert len(set(ports)) == 3
         assert [endpoint.proxy_url for endpoint in batch.endpoints] == [f"http://127.0.0.1:{port}" for port in ports]
-        assert all([await mihomo._accepts(port) for port in ports])
+        assert all([await core_batch._accepts(port) for port in ports])
         assert all(endpoint.shared for endpoint in batch.endpoints)
         for endpoint in batch.endpoints:
             await endpoint.ensure_alive()
@@ -192,20 +195,20 @@ def test_nodes_of_a_batch_share_one_mihomo(fake_mihomo):
     ports = serve(nodes, inspect)
     assert len(fake_mihomo) == 1
     # Stopped: its ports are free and no longer reserved.
-    assert not set(ports) & MihomoManager._allocated_ports
-    assert not any(asyncio.run(mihomo._accepts(port)) for port in ports)
+    assert not set(ports) & PortManager._allocated_ports
+    assert not any(asyncio.run(core_batch._accepts(port)) for port in ports)
 
 
 def test_a_batch_is_ready_only_once_mihomo_relays(fake_mihomo, monkeypatch):
     """The stand-in, like Mihomo, accepts connections 0.2 s before it relays them."""
     reached = []
-    serve_ready = mihomo._serve_ready
+    serve_ready = core_batch._serve_ready
 
     async def counted(reader, writer):
         reached.append(time.monotonic())
         await serve_ready(reader, writer)
 
-    monkeypatch.setattr(mihomo, "_serve_ready", counted)
+    monkeypatch.setattr(core_batch, "_serve_ready", counted)
     started = time.monotonic()
 
     async def inspect(batch):
@@ -283,7 +286,7 @@ def test_a_listener_whose_port_was_taken_meanwhile_gets_another(fake_mihomo):
 
 
 def test_a_mihomo_that_runs_but_never_relays_is_not_split_up(fake_mihomo, monkeypatch):
-    monkeypatch.setattr(mihomo, "START_TIMEOUT", 0.6)
+    monkeypatch.setattr(core_batch, "START_TIMEOUT", 0.6)
     nodes = [BatchNode(ss("10.0.0.1", "one")), BatchNode(ss("never-ready.invalid", "two"))]
 
     async def inspect(batch):
@@ -315,15 +318,15 @@ def test_a_link_without_a_mihomo_proxy_starts_nothing(fake_mihomo):
 
 def test_a_mihomo_that_exits_while_serving_is_noticed(fake_mihomo):
     async def run():
-        shared = MihomoBatch([BatchNode(ss("crash.invalid", "a")), BatchNode(ss("10.0.0.2", "b"))], CONFIG)
-        alone = MihomoBatch([BatchNode(ss("crash.invalid", "c"), idx=1, total=1)], CONFIG)
+        shared = CoreBatch([BatchNode(ss("crash.invalid", "a")), BatchNode(ss("10.0.0.2", "b"))], CONFIG)
+        alone = CoreBatch([BatchNode(ss("crash.invalid", "c"), idx=1, total=1)], CONFIG)
         async with shared, alone:
             await asyncio.sleep(1.0)
             for endpoint in shared.endpoints:
-                with pytest.raises(MihomoInstanceLost) as lost:
+                with pytest.raises(CoreInstanceLost) as lost:
                     await endpoint.ensure_alive()
                 assert lost.value.retry
-            with pytest.raises(MihomoInstanceLost) as lost:
+            with pytest.raises(CoreInstanceLost) as lost:
                 await alone.endpoints[0].ensure_alive()
             assert not lost.value.retry
             assert shared.exited() == ["crashed with code 2 [panic: crashed while serving]"]
@@ -338,25 +341,25 @@ def test_a_mihomo_that_exits_while_serving_is_noticed(fake_mihomo):
 
 def test_runner_starts_and_stops_a_mihomo_for_one_node(fake_mihomo):
     async def run():
-        async with MihomoRunner(node=ss("10.0.0.1", "node"), config=CONFIG) as runner:
+        async with CoreRunner(node=ss("10.0.0.1", "node"), config=CONFIG) as runner:
             port = runner.port
             assert runner.proxy_url == f"http://127.0.0.1:{port}"
-            assert await mihomo._accepts(port)
+            assert await core_batch._accepts(port)
             await runner.ensure_alive()
         return port, runner.port
 
     port, after = asyncio.run(run())
     assert after is None
-    assert not asyncio.run(mihomo._accepts(port))
+    assert not asyncio.run(core_batch._accepts(port))
 
 
 def test_runner_on_a_batch_endpoint_leaves_the_batch_running(fake_mihomo):
     async def run():
-        async with MihomoBatch([BatchNode(ss("10.0.0.1", "a")), BatchNode(ss("10.0.0.2", "b"))], CONFIG) as batch:
+        async with CoreBatch([BatchNode(ss("10.0.0.1", "a")), BatchNode(ss("10.0.0.2", "b"))], CONFIG) as batch:
             endpoint = batch.endpoints[0]
-            async with MihomoRunner(node=endpoint.link, config=CONFIG, endpoint=endpoint) as runner:
+            async with CoreRunner(node=endpoint.link, config=CONFIG, endpoint=endpoint) as runner:
                 assert runner.port == endpoint.port
-            return await mihomo._accepts(endpoint.port)
+            return await core_batch._accepts(endpoint.port)
 
     assert asyncio.run(run())
     assert len(fake_mihomo) == 1
@@ -364,7 +367,7 @@ def test_runner_on_a_batch_endpoint_leaves_the_batch_running(fake_mihomo):
 
 def test_runner_raises_why_mihomo_refused_its_node(fake_mihomo):
     async def run():
-        async with MihomoRunner(node=ss("10.0.0.9", "broken", cipher="not-a-cipher"), config=CONFIG):
+        async with CoreRunner(node=ss("10.0.0.9", "broken", cipher="not-a-cipher"), config=CONFIG):
             pass
 
     with pytest.raises(RuntimeError, match="unknown method: not-a-cipher"):
@@ -396,7 +399,7 @@ def test_scan_checks_the_nodes_of_a_crashed_mihomo_again_and_finds_the_one_that_
 
 
 class _Batch:
-    """A MihomoBatch that starts nothing, and keeps count."""
+    """A CoreBatch that starts nothing, and keeps count."""
 
     sizes = []
     live = 0
@@ -419,7 +422,7 @@ class _Batch:
 
 
 def test_scan_keeps_to_its_workers_and_mihomo_instances(monkeypatch):
-    monkeypatch.setattr(mihomo, "MihomoBatch", _Batch)
+    monkeypatch.setattr(core_batch, "CoreBatch", _Batch)
     monkeypatch.setattr(_Batch, "sizes", [])
     monkeypatch.setattr(_Batch, "peak", 0)
     checking = {"now": 0, "peak": 0}
@@ -446,7 +449,7 @@ def test_scan_keeps_to_its_workers_and_mihomo_instances(monkeypatch):
 
 
 def test_scan_hands_on_a_result_for_a_check_that_raised(monkeypatch):
-    monkeypatch.setattr(mihomo, "MihomoBatch", _Batch)
+    monkeypatch.setattr(core_batch, "CoreBatch", _Batch)
 
     async def check(idx, node, endpoint):
         if idx == 2:
@@ -463,7 +466,7 @@ def test_scan_hands_on_a_result_for_a_check_that_raised(monkeypatch):
     (1, (1, 2)), (8, (8, 2)), (29, (29, 2)), (32, (32, 2)), (33, (32, 3)), (64, (32, 3)), (256, (32, 9)),
 ])
 def test_nodes_per_mihomo_and_mihomos_at_once(workers, plan):
-    assert ResourceLimits.mihomo_instances(workers) == plan
+    assert ResourceLimits.core_instances(workers) == plan
 
 
 def test_a_router_checks_what_fits_its_memory_with_two_mihomos(monkeypatch):
@@ -471,7 +474,7 @@ def test_a_router_checks_what_fits_its_memory_with_two_mihomos(monkeypatch):
     monkeypatch.setattr(limits, "get_free_memory_mb", lambda: 787.0)
     workers, _ = ResourceLimits.get_max_safe_workers({"mem_per_worker": 8})
     assert workers == 29
-    assert ResourceLimits.mihomo_instances(workers)[1] == 2
+    assert ResourceLimits.core_instances(workers)[1] == 2
     assert ResourceLimits.memory_needed_mb(workers, 8) <= 787 - limits.RESERVED_MB
     assert ResourceLimits.memory_needed_mb(workers + 1, 8) > 787 - limits.RESERVED_MB
 
@@ -481,7 +484,7 @@ def test_android_checks_at_most_64_nodes_through_three_mihomos(monkeypatch):
     monkeypatch.setattr(limits, "IS_ANDROID", True)
     workers, _ = ResourceLimits.get_max_safe_workers({})
     assert workers == 64
-    assert ResourceLimits.mihomo_instances(workers)[1] == 3
+    assert ResourceLimits.core_instances(workers)[1] == 3
 
 
 def test_a_nonsensical_memory_budget_per_node_falls_back_to_the_default(monkeypatch):
@@ -523,8 +526,8 @@ async def socks5_get(port, target_port):
 @contextlib.asynccontextmanager
 async def shadowsocks_server(tmp_path):
     """A real Mihomo serving Shadowsocks, which goes out directly: the far end of the test nodes."""
-    port, ready_port = MihomoManager.get_free_port(), MihomoManager.get_free_port()
-    ready_server = await asyncio.start_server(mihomo._serve_ready, "127.0.0.1", 0)
+    port, ready_port = PortManager.get_free_port(), PortManager.get_free_port()
+    ready_server = await asyncio.start_server(core_batch._serve_ready, "127.0.0.1", 0)
     config = {
         "allow-lan": False, "log-level": "error", "mode": "rule",
         "proxies": [{"name": "nodesieve-ready", "type": "http", "server": "127.0.0.1",
@@ -546,7 +549,7 @@ async def shadowsocks_server(tmp_path):
     )
     try:
         for _ in range(500):
-            if await mihomo._relays(ready_port):
+            if await core_batch._relays(ready_port):
                 break
             await asyncio.sleep(0.02)
         else:
@@ -556,8 +559,8 @@ async def shadowsocks_server(tmp_path):
         ready_server.close()
         process.terminate()
         await process.wait()
-        MihomoManager.release_port(port)
-        MihomoManager.release_port(ready_port)
+        PortManager.release_port(port)
+        PortManager.release_port(ready_port)
 
 
 @needs_mihomo
@@ -576,7 +579,7 @@ def test_real_mihomo_serves_each_node_through_its_own_listener(tmp_path):
             nodes = [BatchNode(ss("127.0.0.1", "A", port=ss_port)),
                      BatchNode(ss("127.0.0.1", "B", port=recorder.sockets[0].getsockname()[1])),
                      BatchNode(ss("10.0.0.9", "C", cipher="not-a-cipher"))]
-            async with MihomoBatch(nodes, CONFIG) as batch:
+            async with CoreBatch(nodes, CONFIG) as batch:
                 a, b, c = batch.endpoints
                 assert len(batch._processes) == 1
                 timeout = aiohttp.ClientTimeout(total=5)
@@ -636,11 +639,11 @@ def test_real_scan_runs_only_a_few_mihomo_processes(tmp_path):
 def test_real_mihomo_killed_mid_check_is_noticed():
     async def run():
         nodes = [BatchNode(ss("10.0.0.1", "a")), BatchNode(ss("10.0.0.2", "b"))]
-        async with MihomoBatch(nodes, CONFIG) as batch:
+        async with CoreBatch(nodes, CONFIG) as batch:
             process = batch._processes[0].proc
             os.kill(process.pid, signal.SIGKILL)
             await process.wait()
-            with pytest.raises(MihomoInstanceLost) as lost:
+            with pytest.raises(CoreInstanceLost) as lost:
                 await batch.endpoints[0].ensure_alive()
             return lost.value
 

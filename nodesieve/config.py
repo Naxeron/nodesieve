@@ -5,7 +5,7 @@ import copy
 import os
 import re
 from typing import Any, Dict, Union
-from nodesieve.constants import CONFIG_FILE, DEFAULT_CONFIG
+from nodesieve.constants import CONFIG_FILE, CORES, DEFAULT_CONFIG
 from nodesieve.logging import log
 
 
@@ -53,6 +53,10 @@ class ConfigManager:
         """Replaces malformed values with their defaults."""
         from nodesieve.routing import normalize_routing
         config["routing"] = normalize_routing(config.get("routing"))
+
+        core = config.get("core")
+        core = core.strip().lower() if isinstance(core, str) else ""
+        config["core"] = core if core in CORES else DEFAULT_CONFIG["core"]
 
         # Ensure subscriptions is a list
         if not isinstance(config.get("subscriptions"), list):

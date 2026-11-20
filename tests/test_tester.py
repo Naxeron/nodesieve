@@ -94,7 +94,7 @@ class TestNodeTester(unittest.TestCase):
             mock_runner.proxy_url = "http://127.0.0.1:12345"
             mock_runner.port = 12345
 
-            with patch("nodesieve.core.tester.MihomoRunner") as MockRunner:
+            with patch("nodesieve.core.tester.CoreRunner") as MockRunner:
                 MockRunner.return_value.__aenter__.return_value = mock_runner
                 chunk_data = b"0" * 131072  # 128KB chunk
 
@@ -135,7 +135,7 @@ class TestNodeTester(unittest.TestCase):
             mock_runner.proxy_url = "http://127.0.0.1:12345"
             mock_runner.port = 12345
 
-            with patch("nodesieve.core.tester.MihomoRunner") as MockRunner:
+            with patch("nodesieve.core.tester.CoreRunner") as MockRunner:
                 MockRunner.return_value.__aenter__.return_value = mock_runner
                 with patch.object(self.tester, "_fetch_ip", return_value=(None, None, 99999.0)):
                     with patch.object(self.tester, "fetch_location") as mock_location:
@@ -177,7 +177,7 @@ class TestNodeTester(unittest.TestCase):
             mock_runner = AsyncMock()
             mock_runner.proxy_url = "http://127.0.0.1:12345"
             mock_runner.port = 12345
-            with patch("nodesieve.core.tester.MihomoRunner") as MockRunner, \
+            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
                     patch.object(tester, "_fetch_ip", new=AsyncMock(side_effect=list(traces))), \
                     patch("nodesieve.core.tester.GeolocationService.get_country_name",
                           new=AsyncMock(return_value=country_name)), \

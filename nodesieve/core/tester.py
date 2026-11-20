@@ -8,7 +8,7 @@ from typing import Optional, Set, Tuple
 import aiohttp
 
 from nodesieve.constants import GEOBLOCKED_REGIONS
-from nodesieve.core.mihomo import MihomoInstanceLost, MihomoRunner, NodeEndpoint
+from nodesieve.core.batch import CoreInstanceLost, CoreRunner, NodeEndpoint, core_for
 from nodesieve.geo import GeolocationService
 from nodesieve.logging import ErrorTracker, safe_close_writer, safe_print
 from nodesieve.parsers.base import (
@@ -146,7 +146,7 @@ class NodeTester:
         return sum(count for country, count in evidence["counts"].items() if country in accepted) / evidence["total"]
 
     def _mux_applies(self, node: str) -> bool:
-        """Whether use_mux would give this node's Mihomo proxy multiplexing."""
+        """Whether use_mux would give this node's Mihomo proxy (the feed's Clash profile) multiplexing."""
         if not self.config.get("use_mux", True):
             return False
         proxy = node_url_to_mihomo_dict(node, use_mux=True)
@@ -154,16 +154,16 @@ class NodeTester:
 
     @staticmethod
     def _as_checked(node: str) -> str:
-        """The link as Mihomo gets it: VLESS with encryption=none."""
+        """The link as the core gets it: VLESS with encryption=none."""
         if node.startswith("vless://"):
             return re.sub(r"encryption=[^&#]+", "encryption=none", node)
         return node
 
     def check_links(self, node: str) -> Optional[Tuple[str, Optional[str]]]:
-        """What the IP check needs Mihomo to serve for a node: the link the node is checked
+        """What the IP check needs the core to serve for a node: the link the node is checked
         with, and the same node with multiplexing for the probe, or None for no probe.
 
-        None instead of the pair when the node is turned away before any Mihomo is needed.
+        None instead of the pair when the node is turned away before any core is needed.
         """
         node = self._as_checked(node)
         node_name = get_node_name(node)
@@ -175,14 +175,19 @@ class NodeTester:
         # Multiplexing (sing-mux) works only when the server supports it, which a link does
         # not say, and a server without it drops every connection. So the node is checked
         # without multiplexing and keeps it only if it then answers a request through it.
-        # Steer connects with its own core and takes no multiplexing from this checker.
+        # Only Mihomo speaks sing-mux, so only a Mihomo scan can probe it. Steer connects
+        # with its own core and takes no multiplexing from this checker.
         if not self._mux_applies(node):
             return node, None
+        return without_mux(node), (node if self._probes_mux() else None)
+
+    def _probes_mux(self) -> bool:
+        """Whether the IP check asks a working node for a request through multiplexing."""
         routing_enabled = self.config.get("routing", {}).get("enabled", False)
-        return without_mux(node), (None if routing_enabled else node)
+        return not routing_enabled and core_for(self.config).name == "mihomo"
 
     def speedtest_links(self, node: str) -> Optional[Tuple[str, Optional[str]]]:
-        """The link the speedtest has Mihomo serve for a node, as check_links gives it; None when there is none."""
+        """The link the speedtest has the core serve for a node, as check_links gives it; None when there is none."""
         node = self._as_checked(node)
         host, port = extract_host_port(node)
         return (node, None) if host and port else None
@@ -192,14 +197,14 @@ class NodeTester:
     ) -> bool:
         """Whether a working node also answers with multiplexing, which only a server that supports it does."""
         try:
-            async with MihomoRunner(
-                node=node, config=self.config, temp_prefix="mux_mihomo_", node_idx=idx, endpoint=endpoint,
+            async with CoreRunner(
+                node=node, config=self.config, temp_prefix="mux_core_", node_idx=idx, endpoint=endpoint,
             ) as runner:
                 ip, _, _ = await self._fetch_ip(trace_url, runner.proxy_url)
                 if not ip:
                     await runner.ensure_alive()
                 return bool(ip)
-        except MihomoInstanceLost as lost:
+        except CoreInstanceLost as lost:
             if lost.retry:
                 raise
             ErrorTracker.record_error("Mux Probe", lost)
@@ -211,12 +216,12 @@ class NodeTester:
     async def test_node_full(
         self, idx: int, node: str, endpoint: Optional[NodeEndpoint] = None,
     ) -> Optional[Tuple[str, float, str]]:
-        """Phase 1 IP check: verifies the node's exit IP and location through a local Mihomo.
+        """Phase 1 IP check: verifies the node's exit IP and location through a local core.
 
-        endpoint is the node's listener on a shared Mihomo, serving the links check_links
-        gives; without one, the node gets a Mihomo of its own for the check. Raises
-        MihomoInstanceLost (with retry) when a shared Mihomo exited during the check, as
-        any of its nodes may have made it: the node is then to be checked again alone.
+        endpoint is the node's listener on a shared core instance, serving the links
+        check_links gives; without one, the node gets an instance of its own for the check.
+        Raises CoreInstanceLost (with retry) when a shared instance exited during the check,
+        as any of its nodes may have made it: the node is then to be checked again alone.
         """
         original_node = node
         routing_enabled = self.config.get("routing", {}).get("enabled", False)
@@ -229,7 +234,7 @@ class NodeTester:
         host, port = extract_host_port(node)
 
         async def drop(label: str, reason: str, **details) -> None:
-            # A Mihomo that exited fails a node too, which is not the node's doing.
+            # A core that exited fails a node too, which is not the node's doing.
             await runner.ensure_alive()
             safe_print(f"[-] Node {idx}/{self.total_nodes} [{node_name}] -> Dropped ({label})")
             self.node_metadata[node] = self.node_metadata[original_node] = {
@@ -237,10 +242,10 @@ class NodeTester:
             }
 
         try:
-            async with MihomoRunner(
+            async with CoreRunner(
                 node=checked_link,
                 config=self.config,
-                temp_prefix="mihomo_",
+                temp_prefix="core_",
                 node_idx=idx,
                 total_nodes=self.total_nodes,
                 endpoint=endpoint,
@@ -347,11 +352,14 @@ class NodeTester:
                         if not loc_score:
                             await runner.ensure_alive()
 
-            # The node qualifies. A Mihomo of its own is closed by now, so the multiplexing
-            # probe starts the next one rather than a second; a shared Mihomo serves the
+            # The node qualifies. An instance of its own is closed by now, so the multiplexing
+            # probe starts the next one rather than a second; a shared instance serves the
             # probe's link as well.
             link = node
-            if mux_link is not None:
+            if mux_link is None and self._mux_applies(node) and not routing_enabled:
+                # The core can't probe multiplexing, so the node goes on without it.
+                link = without_mux(node)
+            elif mux_link is not None:
                 answered = await self._answers_multiplexed(
                     idx, mux_link, TRACE_URL_IPV4 if ipv4_ip else TRACE_URL_IPV6,
                     endpoint.mux if endpoint is not None else None,
@@ -396,7 +404,7 @@ class NodeTester:
 
             safe_print(f"[*] Node {idx}/{self.total_nodes} -> {new_name}")
             return supported_node, latency, node
-        except MihomoInstanceLost as lost:
+        except CoreInstanceLost as lost:
             if lost.retry:
                 raise
             ErrorTracker.record_error("Test Node", lost)
@@ -414,7 +422,7 @@ class NodeTester:
     ) -> Optional[Tuple[str, float, float]]:
         """Phase 2 Speedtest: Downloads payload chunks through the node to calculate sustained throughput.
 
-        endpoint, a shared Mihomo, and MihomoInstanceLost work as in test_node_full.
+        endpoint, a shared core instance, and CoreInstanceLost work as in test_node_full.
         """
         links = self.speedtest_links(node)
         if links is None:
@@ -424,10 +432,10 @@ class NodeTester:
         node_name = get_node_name(node)
 
         try:
-            async with MihomoRunner(
+            async with CoreRunner(
                 node=node,
                 config=self.config,
-                temp_prefix="speed_mihomo_",
+                temp_prefix="speed_core_",
                 node_idx=idx,
                 total_nodes=self.total_nodes,
                 endpoint=endpoint,
@@ -547,7 +555,7 @@ class NodeTester:
 
                     safe_print(f"[*] Speedtest {idx}/{self.total_nodes} -> {node_name}")
                     return node, speed_bps, loc_score
-        except MihomoInstanceLost as lost:
+        except CoreInstanceLost as lost:
             if lost.retry:
                 raise
             ErrorTracker.record_error("Speedtest Node", lost)

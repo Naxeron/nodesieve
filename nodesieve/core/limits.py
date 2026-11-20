@@ -5,18 +5,18 @@ from typing import Optional, Tuple
 from nodesieve.constants import IS_ANDROID, IS_TERMUX
 from nodesieve.logging import get_free_memory_mb
 
-# Memory left to the system, Python itself and Mihomo's code, which every instance shares.
+# Memory left to the system, Python itself and the core's code, which every instance shares.
 RESERVED_MB = 500
-# One Mihomo instance holds about 20 MB of memory of its own (heap and stacks), whether it
-# serves 1 node or 128; each node adds about 0.5 MB while its IP check runs, 1.1 MB under
-# the location probe's 16 parallel requests (Mihomo alpha-100ff73, 2026-11-20). The budget per node
-# checked at once, mem_per_worker, covers that share and the check's Python side.
-MIHOMO_INSTANCE_MB = 24.0
+# One core instance holds memory of its own (heap and stacks) whether it serves 1 node or 128:
+# about 20 MB for Mihomo (alpha-100ff73), 12 MB for Xray (26.10). Each node adds about 0.5 MB
+# while its IP check runs, 1.1 MB under the location probe's 16 parallel requests (2026-11-20).
+# The budget per node checked at once, mem_per_worker, covers that share and the check's Python side.
+CORE_INSTANCE_MB = 24.0
 DEFAULT_MEM_PER_WORKER_MB = 8.0
-# Nodes one Mihomo instance serves. When an instance exits in the middle of a check, its
+# Nodes one core instance serves. When an instance exits in the middle of a check, its
 # unfinished nodes are checked again, each with an instance of its own.
 NODES_PER_INSTANCE = 32
-# Nodes checked at once. On Android this keeps the Mihomo processes of a scan to three:
+# Nodes checked at once. On Android this keeps the core processes of a scan to three:
 # Android 12 and newer kill child processes beyond 32 across all apps.
 MAX_WORKERS = 256
 MAX_WORKERS_ANDROID = 64
@@ -26,8 +26,8 @@ class ResourceLimits:
     """Calculates safe concurrent worker bounds based on system memory and OS file descriptor limits."""
 
     @staticmethod
-    def mihomo_instances(workers: int) -> Tuple[int, int]:
-        """Nodes per Mihomo instance, and instances at once, for checking `workers` nodes at once.
+    def core_instances(workers: int) -> Tuple[int, int]:
+        """Nodes per core instance, and instances at once, for checking `workers` nodes at once.
 
         One instance more than the nodes fill lets a new batch start while the last nodes of
         another are still being checked.
@@ -38,9 +38,9 @@ class ResourceLimits:
 
     @staticmethod
     def memory_needed_mb(workers: int, mem_per_worker: float = DEFAULT_MEM_PER_WORKER_MB) -> float:
-        """Memory a scan checking `workers` nodes at once needs: its nodes and its Mihomo instances."""
-        _, instances = ResourceLimits.mihomo_instances(workers)
-        return workers * mem_per_worker + instances * MIHOMO_INSTANCE_MB
+        """Memory a scan checking `workers` nodes at once needs: its nodes and its core instances."""
+        _, instances = ResourceLimits.core_instances(workers)
+        return workers * mem_per_worker + instances * CORE_INSTANCE_MB
 
     @staticmethod
     def get_max_safe_workers(config: Optional[dict] = None) -> Tuple[int, float]:
@@ -57,7 +57,7 @@ class ResourceLimits:
         if not mem_per_worker > 0:
             mem_per_worker = DEFAULT_MEM_PER_WORKER_MB
 
-        max_safe_workers = int(safe_mem_mb / (mem_per_worker + MIHOMO_INSTANCE_MB / NODES_PER_INSTANCE))
+        max_safe_workers = int(safe_mem_mb / (mem_per_worker + CORE_INSTANCE_MB / NODES_PER_INSTANCE))
         while max_safe_workers > 1 and ResourceLimits.memory_needed_mb(max_safe_workers, mem_per_worker) > safe_mem_mb:
             max_safe_workers -= 1
 
@@ -82,7 +82,7 @@ class ResourceLimits:
         except Exception:
             pass
 
-        # The nodes checked at once also set a scan's CPU load, its connections and its Mihomo
+        # The nodes checked at once also set a scan's CPU load, its connections and its core
         # processes, one per NODES_PER_INSTANCE nodes.
         max_workers = MAX_WORKERS_ANDROID if (IS_TERMUX or IS_ANDROID) else MAX_WORKERS
         max_safe_workers = min(max_safe_workers, max_workers)

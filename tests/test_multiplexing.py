@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 import nodesieve.feed as feed_module
+from nodesieve.core.batch import core_for
 from nodesieve.core.tester import TRACE_URL_IPV4, TRACE_URL_IPV6, NodeTester
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict, without_mux
 from nodesieve.ui.dashboard import VPNDashboard
@@ -54,7 +55,7 @@ class _Instance:
 
 
 class _Endpoint:
-    """A link's listener on a shared Mihomo, as MihomoBatch hands it out."""
+    """A link's listener on a shared Mihomo, as CoreBatch hands it out."""
 
     def __init__(self, link):
         self.link, self.mux = link, None
@@ -120,8 +121,8 @@ class _Servers:
 @pytest.fixture
 def servers():
     farm = _Servers()
-    with patch("nodesieve.core.tester.MihomoRunner", farm.mihomo), \
-            patch("nodesieve.core.mihomo.MihomoBatch", farm.batch), \
+    with patch("nodesieve.core.tester.CoreRunner", farm.mihomo), \
+            patch("nodesieve.core.batch.CoreBatch", farm.batch), \
             patch.object(NodeTester, "_fetch_ip", farm.trace), \
             patch("nodesieve.core.tester.GeolocationService.get_country_name",
                   AsyncMock(return_value="United States")):
@@ -129,7 +130,7 @@ def servers():
 
 
 def check(node, **config):
-    tester = NodeTester({"use_mux": True, **config}, total_nodes=1)
+    tester = NodeTester({"use_mux": True, "core": "mihomo", **config}, total_nodes=1)
     return tester, asyncio.run(tester.test_node_full(1, node))
 
 
@@ -235,7 +236,7 @@ def test_scan_reports_multiplexing_and_publishes_it_only_where_it_works(servers,
     servers.with_mux.add("mux.example")
     nodes = [ws_node("mux.example"), ws_node("plain.example"), VISION]
     dashboard = VPNDashboard({
-        "subscriptions": [], "use_mux": True, "workers": 2, "tcp_workers": 2,
+        "subscriptions": [], "use_mux": True, "workers": 2, "tcp_workers": 2, "core": "mihomo",
     })
 
     async def speedtest(candidates, tester=None):
@@ -246,7 +247,7 @@ def test_scan_reports_multiplexing_and_publishes_it_only_where_it_works(servers,
             patch.object(dashboard, "run_speedtest_nodes_async", speedtest), \
             patch("nodesieve.ui.dashboard.ResourceLimits.get_max_safe_workers", return_value=(2, 8192)), \
             patch("nodesieve.ui.dashboard.NodeFetcher.fetch_all", AsyncMock(return_value=(nodes, {}))), \
-            patch("nodesieve.ui.dashboard.MihomoManager.setup"), \
+            patch("nodesieve.ui.dashboard.setup_core", side_effect=core_for), \
             caplog.at_level("INFO", logger="nodesieve"):
         assert asyncio.run(dashboard.run_pipeline_async())
 
@@ -265,3 +266,38 @@ def test_scan_reports_multiplexing_and_publishes_it_only_where_it_works(servers,
     assert {proxy["server"]: "smux" in proxy for proxy in proxies} == {
         "mux.example": True, "plain.example": False, "vision.example": False,
     }
+
+
+def test_an_xray_scan_checks_without_multiplexing_and_publishes_none(servers):
+    """Only Mihomo speaks sing-mux, so through Xray no node is offered it and none keeps it."""
+    servers.with_mux.add("mux.example")
+    node = ws_node("mux.example")
+    tester, (survivor, _, tested) = check(node, core="xray")
+    assert servers.started == [("mux.example", False)]
+    assert tested == node
+    assert survivor.split("#")[0] == without_mux(node).split("#")[0]
+    assert not multiplexed(survivor)
+    assert tester.mux_offered == 0
+
+
+def test_an_xray_scan_says_the_clash_profile_goes_without_multiplexing(servers, caplog):
+    servers.with_mux.add("mux.example")
+    nodes = [ws_node("mux.example"), VISION]
+    dashboard = VPNDashboard({"subscriptions": [], "use_mux": True, "workers": 2, "tcp_workers": 2, "core": "xray"})
+
+    async def speedtest(candidates, tester=None):
+        return [(candidate[0], 1_000_000.0, 0.0) for candidate in candidates]
+
+    with patch.object(dashboard, "_get_real_ip", AsyncMock(return_value=None)), \
+            patch.object(dashboard, "filter_tcp", AsyncMock(return_value=nodes)), \
+            patch.object(dashboard, "run_speedtest_nodes_async", speedtest), \
+            patch("nodesieve.ui.dashboard.ResourceLimits.get_max_safe_workers", return_value=(2, 8192)), \
+            patch("nodesieve.ui.dashboard.NodeFetcher.fetch_all", AsyncMock(return_value=(nodes, {}))), \
+            patch("nodesieve.ui.dashboard.setup_core", side_effect=core_for), \
+            caplog.at_level("INFO", logger="nodesieve"):
+        assert asyncio.run(dashboard.run_pipeline_async())
+
+    assert "through up to 2 Xray instances" in caplog.text
+    assert "only a scan through Mihomo can tell which nodes support it" in caplog.text
+    profile = (Path(feed_module.PROJECT_ROOT) / "feed" / "clash.yaml").read_text(encoding="utf-8")
+    assert not any("smux" in proxy for proxy in yaml.safe_load(profile)["proxies"])

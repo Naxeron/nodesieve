@@ -16,15 +16,16 @@ import pytest
 import yaml
 
 from nodesieve.constants import MIHOMO_PATH
-from nodesieve.core import mihomo
-from nodesieve.core.mihomo import (
+from nodesieve.core import batch as core_batch
+from nodesieve.core.batch import (
     BatchNode,
-    MihomoBatch,
-    MihomoRunner,
+    CoreBatch,
+    CoreRunner,
     android_resolved_hosts,
-    render_batch_config,
 )
+from nodesieve.core.mihomo import MihomoCore, render_batch_config
 
+MIHOMO = {"use_mux": False, "core": "mihomo"}
 NODE = "vless://11111111-2222-3333-4444-555555555555@Node.Example:443?security=tls&sni=node.example&type=tcp#Test"
 
 
@@ -47,11 +48,11 @@ def lookup(result):
 
 @pytest.fixture
 def android(monkeypatch):
-    monkeypatch.setattr(mihomo, "IS_ANDROID", True)
+    monkeypatch.setattr(core_batch, "IS_ANDROID", True)
 
 
 def test_mihomo_resolves_for_itself_outside_android(monkeypatch):
-    monkeypatch.setattr(mihomo, "IS_ANDROID", False)
+    monkeypatch.setattr(core_batch, "IS_ANDROID", False)
     with lookup(addrinfo("203.0.113.7")) as resolver:
         assert asyncio.run(android_resolved_hosts("node.example")) == {}
     resolver.assert_not_called()
@@ -120,11 +121,11 @@ def test_batch_on_android_hands_every_servers_addresses_to_its_mihomo(android):
              BatchNode(link("203.0.113.9", "by-address"))]
 
     async def run():
-        async with MihomoBatch(nodes, {"use_mux": False}) as batch:
-            return batch.endpoints
+        async with CoreBatch(nodes, MIHOMO) as instance:
+            return instance.endpoints
 
     with patch("asyncio.base_events.BaseEventLoop.getaddrinfo", new=resolve), \
-            patch.object(mihomo.asyncio, "create_subprocess_exec", new=launch):
+            patch.object(core_batch.asyncio, "create_subprocess_exec", new=launch):
         endpoints = asyncio.run(run())
     assert written["config"]["hosts"] == {
         "a.example": ["203.0.113.1", "2001:db8::1"], "b.example": ["203.0.113.2"],
@@ -145,10 +146,10 @@ def test_runner_on_android_hands_the_resolved_server_to_mihomo(android):
         raise OSError("not starting Mihomo in this test")
 
     async def run():
-        async with MihomoRunner(node=NODE, config={"use_mux": False}):
+        async with CoreRunner(node=NODE, config=MIHOMO):
             pass
 
-    with lookup(addrinfo("203.0.113.7")), patch.object(mihomo.asyncio, "create_subprocess_exec", new=launch):
+    with lookup(addrinfo("203.0.113.7")), patch.object(core_batch.asyncio, "create_subprocess_exec", new=launch):
         with pytest.raises(OSError):
             asyncio.run(run())
     assert written["config"]["hosts"] == {"node.example": ["203.0.113.7"]}
@@ -185,8 +186,8 @@ def test_mihomo_reaches_a_node_through_its_hosts_entry(android):
         return addrinfo("127.0.0.1")
 
     async def run():
-        async with MihomoBatch([BatchNode("http://upstream.nodesieve.invalid#Node", idx=1, total=1)], {}) as batch:
-            endpoint = batch.endpoints[0]
+        async with CoreBatch([BatchNode("http://upstream.nodesieve.invalid#Node", idx=1, total=1)], MIHOMO) as instance:
+            endpoint = instance.endpoints[0]
             assert endpoint.error is None
             reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
             writer.write(b"CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid:443\r\n\r\n")
@@ -196,7 +197,7 @@ def test_mihomo_reaches_a_node_through_its_hosts_entry(android):
 
     try:
         with patch("asyncio.base_events.BaseEventLoop.getaddrinfo", new=resolve), \
-                patch.object(mihomo, "mihomo_proxy", return_value=proxy):
+                patch.object(MihomoCore, "proxy", return_value=proxy):
             asyncio.run(run())
         assert received and received[0].startswith(b"CONNECT example.invalid:443 ")
     finally:

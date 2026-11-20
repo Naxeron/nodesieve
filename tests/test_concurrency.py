@@ -6,7 +6,7 @@ import unittest
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import MagicMock, patch
 
-from nodesieve.core.mihomo import MihomoManager
+from nodesieve.core.batch import PortManager
 from nodesieve.geo import GeolocationService
 from nodesieve.logging import safe_close_writer
 
@@ -42,13 +42,13 @@ class TestConcurrency(unittest.TestCase):
     def test_ephemeral_port_allocation(self):
         ports = []
         for _ in range(5):
-            p = MihomoManager.get_free_port()
+            p = PortManager.get_free_port()
             self.assertGreater(p, 0)
             self.assertNotIn(p, ports)
             ports.append(p)
 
         for p in ports:
-            MihomoManager.release_port(p)
+            PortManager.release_port(p)
 
     def test_geolocation_service_offline_fallback(self):
         async def run():
@@ -62,16 +62,16 @@ class TestConcurrency(unittest.TestCase):
 
     def test_mihomo_runner_cleanup_on_aenter_exception(self):
         async def run():
-            from nodesieve.core.mihomo import MihomoRunner
+            from nodesieve.core.batch import CoreRunner
 
-            initial_ports = set(MihomoManager._allocated_ports)
-            runner = MihomoRunner("vless://no-server-here#Invalid", config={})
+            initial_ports = set(PortManager._allocated_ports)
+            runner = CoreRunner("vless://no-server-here#Invalid", config={})
             with self.assertRaises(Exception):
                 async with runner:
                     pass
 
             # Port must be completely released back to pool
-            self.assertEqual(MihomoManager._allocated_ports, initial_ports)
+            self.assertEqual(PortManager._allocated_ports, initial_ports)
             self.assertIsNone(runner.port)
 
         asyncio.run(run())
@@ -148,7 +148,7 @@ class TestConcurrencyStress(IsolatedAsyncioTestCase):
         servers = []
         try:
             for _ in range(50):
-                p = MihomoManager.get_free_port()
+                p = PortManager.get_free_port()
                 self.assertNotIn(p, ports, f"Port collision detected for port {p}!")
                 ports.append(p)
                 servers.append(await asyncio.start_server(lambda r, w: None, "127.0.0.1", p))
@@ -157,7 +157,7 @@ class TestConcurrencyStress(IsolatedAsyncioTestCase):
             for server, port in zip(servers, ports):
                 server.close()
                 await server.wait_closed()
-                MihomoManager.release_port(port)
+                PortManager.release_port(port)
 
     async def test_safe_close_writer_50_concurrent_hanging_peers(self):
         """Rule 1: 50 peers that never finish closing hold nobody up beyond the timeout."""

@@ -17,8 +17,8 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 # Modules that build paths inside the project directory when they run.
 _PROJECT_ROOT_USERS = (
+    "nodesieve.core.batch",
     "nodesieve.core.fetcher",
-    "nodesieve.core.mihomo",
     "nodesieve.feed",
     "nodesieve.ui.cli",
 )
@@ -31,6 +31,17 @@ def _temporary_project_dir(tmp_path_factory, monkeypatch):
     for module in _PROJECT_ROOT_USERS:
         monkeypatch.setattr(f"{module}.PROJECT_ROOT", project)
     monkeypatch.setattr(NodeFetcher, "cache_dir", str(project / "sub_cache"))
+
+
+@pytest.fixture(autouse=True)
+def _no_core_downloads(monkeypatch):
+    """A core's binary would be downloaded into the real project directory: tests that mean to supply their own."""
+    def refuse(url, *args, **kwargs):
+        raise AssertionError(f"a test tried to download {url}")
+
+    for module in ("nodesieve.core.xray", "nodesieve.core.mihomo"):
+        monkeypatch.setattr(f"{module}.download", refuse)
+    monkeypatch.setattr("nodesieve.core.xray.release_assets", refuse)
 
 
 def _project_files():

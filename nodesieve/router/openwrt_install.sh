@@ -76,7 +76,7 @@ fi
 python3 -c 'import aiohttp, yaml' 2>/dev/null || fail 'Python or one of its modules does not work after installing.'
 
 # 2. Code. Only what the archive holds is replaced: the settings, caches and the
-# Mihomo binary in the directory stay.
+# Xray and Mihomo binaries in the directory stay.
 [ -s "$NS_ARCHIVE" ] || fail 'The code did not arrive on the router.'
 rm -rf "$DIR.new"
 mkdir -p "$DIR.new"
@@ -86,7 +86,7 @@ mkdir -p "$DIR"
 for item in "$DIR.new"/*; do
     name=${item##*/}
     case "$name" in
-        nodesieve_config.json|feed|sub_cache|steer-output|mihomo) continue ;;
+        nodesieve_config.json|feed|sub_cache|steer-output|xray|mihomo) continue ;;
     esac
     rm -rf "${DIR:?}/$name"
     mv "$item" "$DIR/$name"

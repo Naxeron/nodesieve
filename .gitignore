@@ -6,6 +6,8 @@
 /crashed_nodes.txt
 /sub_cache/
 /feed/
+# Written by tools/core_bench.py: node names and server addresses
+/core-bench/
 
 # Written by earlier versions, which a checkout may still hold: settings, router scripts
 # and AmneziaWG profiles, all with credentials
@@ -14,7 +16,9 @@
 /forkozz-output/
 /*.conf
 
-# Mihomo binary, downloaded on first run
+# Core binaries, downloaded on first run
+/xray
+/xray.exe
 /mihomo
 /mihomo.exe
 

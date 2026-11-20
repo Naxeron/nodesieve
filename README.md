@@ -25,11 +25,14 @@ and updates the feed; `serve` hands the feed to VPN apps. `--help` lists every o
 
 Developed and tested on Linux with Python 3.14, and on OpenWrt's Python 3.11.
 
-- **Mihomo.** Nodes are checked through local
-  [Mihomo](https://github.com/MetaCubeX/mihomo) instances, each serving up to 32 of
-  them (see [Local Mihomo instances](#local-mihomo-instances)). If the project
-  directory has no `mihomo` binary, the first check downloads the latest alpha build
-  for this platform from Mihomo's GitHub releases.
+- **Core.** Nodes are checked through local instances of a proxy core, each serving up
+  to 32 of them (see [Local core instances](#local-core-instances)):
+  [Xray](https://github.com/XTLS/Xray-core), the default, which share links are
+  written for, or [Mihomo](https://github.com/MetaCubeX/mihomo), with `"core": "mihomo"`
+  in `nodesieve_config.json`. `--core` picks one for a single run. If the project
+  directory has no `xray` binary, the first check downloads the latest Xray release for
+  this platform from Xray's GitHub releases and checks it against the SHA-256 published
+  with it; Mihomo's is the latest alpha build, from Mihomo's.
 - **Settings** are stored in `nodesieve_config.json` in the project directory. The
   file is created the first time settings are saved, for example by `--add-sub`, and
   git ignores it because it holds subscription links and router credentials.
@@ -44,7 +47,7 @@ Developed and tested on Linux with Python 3.14, and on OpenWrt's Python 3.11.
 - **Scan target.** A scan ranks one of two ways. The **Mihomo target**, the default,
   ranks by exit country and download speed. The **Steer target** ranks by location
   agreement, for [Steer's main pool](#steer-main-pool). `--target` picks one for a
-  single run.
+  single run. Either core checks the nodes for either target.
 
 The files a scan writes (`feed/`, `crashed_nodes.txt`, `sub_cache/`) contain proxy
 credentials and are ignored by git, as is `steer-output/`, whose routing report holds
@@ -75,21 +78,21 @@ pip install paramiko
 Without Paramiko, `install-router` says what to install.
 
 - **Keep the project in Termux's home directory.** Shared storage (`~/storage/shared`)
-  is mounted `noexec`, so Mihomo can't run from there.
+  is mounted `noexec`, so the core can't run from there.
 - **Android's child process limit.** Android 12 and newer kill child processes when
   more than 32 run across all apps, the oldest first. A scan stays well under it, Steer
-  scans included: it checks up to 64 nodes at once through at most three Mihomo
+  scans included: it checks up to 64 nodes at once through at most three core
   processes, and asks the GeoIP providers from Python itself. If other apps run many
   processes too, turn the limit off: on Android 14 and newer with Developer options →
   *Disable child process restrictions*; on Android 12L and 13 with
   `adb shell "settings put global settings_enable_monitor_phantom_procs false"` from a
   computer; for Android 12, see
   [these notes by a Termux maintainer](https://github.com/agnostic-apollo/Android-Docs/blob/master/en/docs/apps/processes/phantom-cached-and-empty-processes.md#how-to-disable-the-phantom-processes-killing).
-- **DNS.** Mihomo finds no `/etc/resolv.conf` on Android and would look host names up
-  through 114.114.114.114 and 8.8.8.8 itself. So on Android, nodesieve resolves each
-  node's server through Android's resolver and passes the addresses to Mihomo. Private
-  DNS, a VPN's DNS, and networks that block other DNS servers then work as they do for
-  every other app.
+- **DNS.** The cores find no `/etc/resolv.conf` on Android and would look host names up
+  through public DNS servers themselves (Mihomo through 114.114.114.114 and 8.8.8.8).
+  So on Android, nodesieve resolves each node's server through Android's resolver and
+  passes the addresses to the core. Private DNS, a VPN's DNS, and networks that block
+  other DNS servers then work as they do for every other app.
 - **Scan with your VPN app off, or with Termux excluded from it** (the app's per-app
   proxy or split tunnelling setting). While a VPN app is connected, Termux's connections
   go through it too, so every node would be checked through your current VPN instead of
@@ -133,8 +136,8 @@ optimization as well, or Android may stop it anyway.
 Every node from the configured subscriptions goes through the same IP check:
 
 1. **TCP reachability.** A raw connection to the node's host and port.
-2. **Exit IP.** The node is reached through a local port of its own on a temporary
-   Mihomo instance and asked for its exit address through Cloudflare's trace
+2. **Exit IP.** The node is reached through a local port of its own on a local
+   instance of the core and asked for its exit address through Cloudflare's trace
    endpoint, over IPv4 and IPv6 separately. This yields the exit IP, its country and
    the latency. A node is dropped when its exit address is this computer's own
    address (an IP leak) and, for the Mihomo target, when it has no outbound
@@ -160,13 +163,19 @@ consensus, with its agreement and vote count.
 
 ### How a node is connected
 
-Each link is translated into a Mihomo proxy, so a node is checked the way Mihomo
-connects to it. Links are read as Xray writes them: TCP,
-WebSocket, gRPC and XHTTP transports, including the request shaping in an XHTTP
-link's `extra`, and `vcn`, the certificate name of a node that is addressed by IP.
-A link's `fm` settings (Xray's finalmask, for example TLS ClientHello fragmentation)
-have no Mihomo counterpart and are not applied; a node that only works with them
-fails the check.
+Through Xray, each link becomes an Xray outbound with every option it carries, so a
+node is checked the way Xray-based apps (v2rayN, v2rayNG, Happ and others) connect to
+it: REALITY and XTLS Vision; the TCP, WebSocket, HTTPUpgrade, gRPC and XHTTP
+transports with their settings, the request shaping in an XHTTP link's `extra`
+included; `vcn`, the certificate name of a node that is addressed by IP; and `fm`,
+Xray's FinalMask, which for example fragments the TLS ClientHello. What Xray 26 no
+longer does fails as it does in those apps: the HTTP/2 transport, and `insecure=1`,
+after which the certificate is checked all the same.
+
+Through Mihomo, each link is translated into a Mihomo proxy, as for the feed's Clash
+profile, so a node is checked the way Clash apps connect to it. The same transports,
+`extra` and `vcn` are read, but `fm` has no Mihomo counterpart and is not applied: a
+node that only works with it fails the check.
 
 `use_mux`, on by default, adds sing-mux multiplexing (Mihomo's `smux`) to every node
 except VLESS with XTLS Vision. Multiplexing only works when the node's server
@@ -175,11 +184,13 @@ Xray server, drops each multiplexed connection. So a node is always checked with
 multiplexing. One that qualifies is then asked for a single request through it and
 keeps multiplexing, in the speedtest and in the feed's Clash profile, only if it
 answers; the scan reports how many nodes do. Set `use_mux` to `false` in `nodesieve_config.json` to
-skip that request. Steer connects with its own core, so a Steer scan never asks.
+skip that request. Only Mihomo speaks sing-mux, so only a scan through Mihomo asks:
+after a scan through Xray, no node in the Clash profile has multiplexing, and the scan
+says so. Steer connects with its own core, so a Steer scan never asks.
 
-### Local Mihomo instances
+### Local core instances
 
-One Mihomo instance serves up to 32 nodes. Each node is a proxy of its own in the
+One instance of the core serves up to 32 nodes. Each node is a proxy of its own in the
 instance's configuration and has a local port that uses only that node: an HTTP and
 SOCKS5 listener on 127.0.0.1. The instance refuses anything else, so no check goes out
 directly. A node whose multiplexing is to be tried gets a second port on the same
@@ -193,13 +204,14 @@ RAM, about 790 MB of it available, checks 30 nodes at once through two instances
 `workers` (or `--workers`) sets a lower number. The speedtest measures up to 8 nodes at
 once, through one instance.
 
-- **A node Mihomo refuses.** Mihomo refuses a whole configuration over one proxy it
-  can't use. Such a node is set aside with Mihomo's reason, shown with its number and
-  written to `crashed_nodes.txt`, and the other nodes of its batch start without it.
-- **A node that crashes Mihomo.** When an instance exits in the middle of the checks,
+- **A node the core refuses.** Xray and Mihomo refuse a whole configuration over one
+  proxy they can't use. Such a node is set aside with the core's reason, shown with its
+  number and written to `crashed_nodes.txt`, and the other nodes of its batch start
+  without it.
+- **A node that crashes the core.** When an instance exits in the middle of the checks,
   the nodes it was still checking are checked again, each with an instance of its own.
-  The node that crashes Mihomo again is recorded in `crashed_nodes.txt`; the others are
-  checked as usual.
+  The node that crashes the core again is recorded in `crashed_nodes.txt`; the others
+  are checked as usual.
 
 ### Mihomo target
 
@@ -272,7 +284,7 @@ files, then:
 
 1. **Packages.** Installs `python3`, `python3-aiohttp` and `python3-yaml` with opkg or
    apk, where they are missing.
-   With the Mihomo binary the first scan downloads, nodesieve takes about 150 MB of the
+   With the core binary the first scan downloads, nodesieve takes about 150 MB of the
    router's storage.
 2. **Code.** Copies the code of this checkout to `/opt/nodesieve`. The repository is
    private, so the router can't download it itself.
@@ -413,12 +425,13 @@ for the architecture and [TEST_INFRA.md](TEST_INFRA.md) for the tests.
   with the `geoip` checks of a newer ipregion.
 - **Python packages** are not pinned: `pip install -U -r requirements.txt` brings
   them up to date.
-- **Mihomo** is downloaded only while the project directory has no `mihomo` binary.
-  Delete the binary to get the current alpha build on the next check.
+- **Xray and Mihomo** are downloaded only while the project directory has no `xray` or
+  `mihomo` binary. Delete the binary to get Xray's current release, or Mihomo's current
+  alpha build, on the next check through it.
 
 ## Third-party software
 
 The location checks are adapted from the GeoIP checks of
 [ipregion](https://github.com/vernette/ipregion) by vernette, under the MIT License; see
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Mihomo is not included and is
-downloaded at run time.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Xray and Mihomo are not included and
+are downloaded at run time.
