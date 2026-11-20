@@ -1,17 +1,17 @@
-# Local settings: subscription links and router credentials. proxy_sites_config.json
-# is the file's name before the project was renamed; the first run renames it.
+# Local settings: subscription links and router credentials
 /nodesieve_config.json
-/proxy_sites_config.json
 
 # Written by the checker; these hold proxy credentials
-/apply_to_router.sh
 /steer-output/
-/forkozz-output/
 /crashed_nodes.txt
 /sub_cache/
 /feed/
 
-# AmneziaWG profiles (private keys), read from the project directory
+# Written by earlier versions, which a checkout may still hold: settings, router scripts
+# and AmneziaWG profiles, all with credentials
+/proxy_sites_config.json
+/apply_to_router.sh
+/forkozz-output/
 /*.conf
 
 # Mihomo binary, downloaded on first run

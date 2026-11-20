@@ -25,6 +25,7 @@ from nodesieve.feed import (
     clash_profile,
     feed_directory,
     feed_status,
+    run_feed_command,
     write_feed,
 )
 from nodesieve.routing import normalize_routing
@@ -40,9 +41,9 @@ VLESS_NAME = "[VLESS: First] 🇩🇪 Germany | 203.0.113.1"
 # One whose server answered through multiplexing, so it keeps it.
 TROJAN = "trojan://private-password@192.0.2.2:443?security=tls&sni=example.org#Second"
 SS = "ss://YWVzLTI1Ni1nY206c2VjcmV0@192.0.2.3:8388#Third"
-# Local nodes without a share link: they use this computer's WARP key and AmneziaWG file.
-WARP = "warp://162.159.192.1:2408#WARP"
-AWG = "awg_conf:US.conf#AWG_US"
+# Links of kinds nodesieve doesn't check, which the feed leaves out.
+VMESS = "vmess://eyJhZGQiOiIxOTIuMC4yLjUifQ==#vmess"
+HYSTERIA = "hysteria2://secret@192.0.2.8:443#hysteria"
 TOKEN = "t" * 24
 FILES = (LINKS_NAME, BASE64_NAME, CLASH_NAME)
 
@@ -58,7 +59,7 @@ def read(tmp_path, name):
 # The files a scan writes
 
 def test_scan_results_become_share_links_base64_and_a_clash_profile(tmp_path):
-    result = write_feed([VLESS, WARP, TROJAN, AWG], feed_config(tmp_path))
+    result = write_feed([VLESS, VMESS, TROJAN, HYSTERIA], feed_config(tmp_path))
     directory = tmp_path / "feed"
     assert result == {"written": True, "count": 2, "left_out": 2, "directory": str(directory)}
     links = read(tmp_path, LINKS_NAME)
@@ -92,7 +93,7 @@ def test_profile_turns_multiplexing_on_only_where_the_scan_checked_it(tmp_path, 
     assert not any("smux" in proxy for proxy in proxies)
 
 
-@pytest.mark.parametrize("nodes", [[], [WARP, AWG], ["vless://unreadable"]])
+@pytest.mark.parametrize("nodes", [[], [VMESS, HYSTERIA], ["vless://unreadable"]])
 def test_scan_without_share_links_leaves_the_feed_as_it_was(tmp_path, nodes):
     config = feed_config(tmp_path)
     write_feed([VLESS, TROJAN], config)
@@ -103,9 +104,18 @@ def test_scan_without_share_links_leaves_the_feed_as_it_was(tmp_path, nodes):
     assert feed_status(config)["count"] == 2
 
 
+def test_feed_in_a_directory_others_may_enter_is_readable_for_a_web_server(tmp_path):
+    # uhttpd serves only files anyone may read; the router's installer opens the feed's
+    # directory for that (711: enter, not list).
+    (tmp_path / "feed").mkdir(mode=0o711)
+    (tmp_path / "feed").chmod(0o711)
+    write_feed([TROJAN], feed_config(tmp_path))
+    assert {(tmp_path / "feed" / name).stat().st_mode & 0o777 for name in FILES} == {0o644}
+
+
 def test_first_scan_without_share_links_writes_nothing(tmp_path):
     config = feed_config(tmp_path)
-    assert not write_feed([WARP], config)["written"]
+    assert not write_feed([VMESS], config)["written"]
     assert not (tmp_path / "feed").exists()
     assert feed_status(config) is None
 
@@ -233,12 +243,12 @@ def test_server_hands_out_each_new_scan_without_a_restart(tmp_path):
 # Scans
 
 def test_mihomo_check_publishes_the_deployed_nodes_fastest_first(tmp_path):
-    dashboard = VPNDashboard({**feed_config(tmp_path), "enable_router_validation": False})
+    dashboard = VPNDashboard({**feed_config(tmp_path)})
     verified = [(TROJAN, 9.0, TROJAN), (VLESS, 5.0, VLESS)]
     measured = [(VLESS, 2e6, 0.0), (TROJAN, 1e6, 0.0)]
     with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(verified, None))), \
             patch.object(dashboard, "run_speedtest_nodes_async", AsyncMock(return_value=measured)):
-        assert asyncio.run(dashboard.run_pipeline_async(check_only=True))
+        assert asyncio.run(dashboard.run_pipeline_async())
     assert read(tmp_path, LINKS_NAME) == VLESS_SHARED + "\n" + TROJAN + "\n"
 
 
@@ -248,14 +258,14 @@ def test_scan_without_survivors_keeps_the_feed_and_says_so(tmp_path, caplog):
     before = read(tmp_path, LINKS_NAME)
     dashboard = VPNDashboard(config)
     with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=([], None))):
-        assert not asyncio.run(dashboard.run_pipeline_async(check_only=True))
+        assert not asyncio.run(dashboard.run_pipeline_async())
     assert read(tmp_path, LINKS_NAME) == before
     assert "keeps the 2 nodes of the scan from" in caplog.text
 
 
 def location():
     summary = {"country": "DE", "score": 1.0, "votes": 3, "total": 3, "counts": {"DE": 3}}
-    return {**summary, "source": "ipregion", "status": "ok", "tested_families": ["ipv4"],
+    return {**summary, "source": "geoip", "status": "ok", "tested_families": ["ipv4"],
             "families": {"ipv4": {**summary, "counts": {"DE": 3}}}}
 
 
@@ -267,21 +277,41 @@ def test_steer_check_publishes_the_ranked_main_pool(tmp_path):
               "routing_output_dir": str(tmp_path / "steer"), "router_host": "192.0.2.1"}
     dashboard = VPNDashboard(config)
     scan = AsyncMock(return_value=([(slow, 7, slow), (fast, 5, fast)], MagicMock(node_metadata=metadata)))
-    with patch.object(dashboard, "fetch_and_verify_candidates_async", scan), \
-            patch.object(dashboard, "deploy_steer") as deploy:
-        assert asyncio.run(dashboard.run_pipeline_async(check_only=True))
-    deploy.assert_not_called()
-    servers = (tmp_path / "steer" / "steer-servers.txt").read_text()
-    assert servers == fast + "\n" + slow + "\n"
-    assert read(tmp_path, LINKS_NAME) == servers
+    with patch.object(dashboard, "fetch_and_verify_candidates_async", scan):
+        assert asyncio.run(dashboard.run_pipeline_async())
+    assert read(tmp_path, LINKS_NAME) == fast + "\n" + slow + "\n"
+    assert json.loads((tmp_path / "steer" / "routing-report.json").read_text())["ready"]
+
+
+def test_feed_command_reports_how_it_went(caplog):
+    assert run_feed_command({}) is None
+    assert run_feed_command({"feed_command": "true"}) is True
+    assert run_feed_command({"feed_command": "echo first >&2; echo boom >&2; exit 3"}) is False
+    assert "feed_command failed with exit code 3: boom" in caplog.text
+    assert run_feed_command({"feed_command": "sleep 5"}, timeout=0.2) is False
+    assert "did not finish within 0 seconds" in caplog.text
+
+
+@pytest.mark.parametrize("dry_run,survivors,runs", [(False, True, 1), (True, True, 0), (False, False, 0)])
+def test_feed_command_follows_each_scan_that_updates_the_feed(tmp_path, dry_run, survivors, runs):
+    marker = tmp_path / "ran"
+    config = {**feed_config(tmp_path), "feed_command": f"echo ran >> '{marker}'"}
+    write_feed([VLESS], config)
+    marker.unlink(missing_ok=True)
+    dashboard = VPNDashboard(config)
+    verified = [(TROJAN, 9.0, TROJAN)] if survivors else []
+    with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(verified, None))), \
+            patch.object(dashboard, "run_speedtest_nodes_async", AsyncMock(return_value=[(TROJAN, 1e6, 0.0)])):
+        asyncio.run(dashboard.run_pipeline_async(dry_run=dry_run))
+    assert (marker.read_text().count("ran") if marker.exists() else 0) == runs
 
 
 def test_check_fails_when_the_feed_cannot_be_written(tmp_path, caplog):
-    dashboard = VPNDashboard({**feed_config(tmp_path), "enable_router_validation": False})
+    dashboard = VPNDashboard({**feed_config(tmp_path)})
     with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=([(TROJAN, 9.0, TROJAN)], None))), \
             patch.object(dashboard, "run_speedtest_nodes_async", AsyncMock(return_value=[(TROJAN, 1e6, 0.0)])), \
             patch("nodesieve.ui.dashboard.write_feed", side_effect=PermissionError("read-only")):
-        assert not asyncio.run(dashboard.run_pipeline_async(check_only=True))
+        assert not asyncio.run(dashboard.run_pipeline_async())
     assert "Cannot write the subscription feed: read-only" in caplog.text
 
 
@@ -334,7 +364,7 @@ def test_serve_refuses_unusable_settings(tmp_path, settings, options):
 
 
 @pytest.mark.parametrize("options", [
-    ["--dry-run"], ["--check"], ["--add-sub", "https://example.org/new"], ["--routing-show"], ["--show-config"],
+    ["--dry-run"], ["--add-sub", "https://example.org/new"], ["--routing-show"], ["--show-config"],
 ])
 def test_serve_runs_on_its_own(tmp_path, options):
     path = settings_file(tmp_path)

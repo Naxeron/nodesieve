@@ -1,6 +1,6 @@
 """Subscription feed: a scan's results as files any VPN app can subscribe to.
 
-Each scan that finds nodes to deploy also writes them to the feed directory, `feed/`
+Each scan that finds working nodes writes them to the feed directory, `feed/`
 in the project directory unless the `feed_dir` setting names another one:
 
 - links.txt: one share link per line. v2rayNG, Hiddify, NekoBox, Happ, v2RayTun and
@@ -22,6 +22,7 @@ import hmac
 from pathlib import Path
 import re
 import secrets
+import subprocess
 from typing import Iterable, Optional
 from urllib.parse import quote, unquote
 
@@ -82,8 +83,7 @@ def _share_link(node: object) -> Optional[str]:
 def _entries(nodes: Iterable, use_mux: bool) -> tuple[list[tuple[str, dict]], int]:
     """(share link, Mihomo proxy) of each node, in order and without repeats, and how many were left out.
 
-    WARP and AmneziaWG nodes (warp://, awg_conf:) use this computer's keys and files and
-    have no share link, so they stay out, as does a link Mihomo can't read.
+    A link of another kind, or one Mihomo can't read, stays out.
     """
     entries: list[tuple[str, dict]] = []
     seen: set[str] = set()
@@ -146,12 +146,38 @@ def write_feed(nodes: Iterable, config: dict) -> dict:
     if not entries:
         return result
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # The files hold proxy credentials, so only their owner reads them, unless their directory
+    # lets others in, as a web server's does: uhttpd serves only files that anyone may read.
+    mode = 0o644 if directory.stat().st_mode & 0o001 else 0o600
     links = "".join(link + "\n" for link, _ in entries)
-    write_private(directory / CLASH_NAME, clash_profile([proxy for _, proxy in entries]))
-    write_private(directory / BASE64_NAME, base64.b64encode(links.encode("utf-8")).decode("ascii"))
-    write_private(directory / LINKS_NAME, links)
+    write_private(directory / CLASH_NAME, clash_profile([proxy for _, proxy in entries]), mode)
+    write_private(directory / BASE64_NAME, base64.b64encode(links.encode("utf-8")).decode("ascii"), mode)
+    write_private(directory / LINKS_NAME, links, mode)
     result["written"] = True
     return result
+
+
+def run_feed_command(config: dict, timeout: float = 120.0) -> Optional[bool]:
+    """Run the feed_command setting after the feed changed: True when it succeeded, None without one."""
+    command = str(config.get("feed_command") or "").strip()
+    if not command:
+        return None
+    try:
+        finished = subprocess.run(command, shell=True, stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log.warning(f"[!] feed_command did not finish within {timeout:.0f} seconds.")
+        return False
+    except OSError as exc:
+        log.warning(f"[!] feed_command could not run: {exc}")
+        return False
+    if finished.returncode != 0:
+        output = (finished.stderr.strip() or finished.stdout.strip()).splitlines()
+        log.warning(f"[!] feed_command failed with exit code {finished.returncode}"
+                    + (f": {output[-1][:300]}" if output else "."))
+        return False
+    log.info("[*] Ran feed_command for the updated feed.")
+    return True
 
 
 def feed_status(config: dict) -> Optional[dict]:

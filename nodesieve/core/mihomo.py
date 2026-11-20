@@ -34,10 +34,8 @@ from nodesieve.constants import (
 )
 from nodesieve.core.limits import ResourceLimits
 from nodesieve.logging import ErrorTracker, log, safe_close_writer, safe_print
-from nodesieve.parsers.awg import parse_amnezia_conf
 from nodesieve.parsers.base import extract_host_port, get_node_name
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
-from nodesieve.warp import WarpScanner
 
 LISTEN_HOST = "127.0.0.1"
 # Seconds a starting Mihomo has to open all its listeners.
@@ -225,20 +223,6 @@ def render_batch_config(
 
 def mihomo_proxy(link: str, config: dict) -> dict:
     """The Mihomo proxy a link is checked through; ValueError for a link that gives none."""
-    if link.startswith("warp://"):
-        host, port = extract_host_port(link)
-        return WarpScanner.generate_warp_proxy_dict(
-            host or "127.0.0.1", port or 2408, get_node_name(link), config=config
-        )
-    if link.startswith("awg_conf:"):
-        conf_file = link.split("awg_conf:", 1)[1].split("#", 1)[0]
-        conf_path = os.path.join(PROJECT_ROOT, conf_file)
-        if not os.path.exists(conf_path) and os.path.exists(conf_file):
-            conf_path = conf_file
-        proxy = parse_amnezia_conf(conf_path, proxy_name=get_node_name(link))
-        if not proxy:
-            raise ValueError(f"Could not parse AWG config: {conf_file}")
-        return proxy
     proxy = node_url_to_mihomo_dict(link, use_mux=config.get("use_mux", True))
     if not proxy:
         raise ValueError("The link does not convert to a Mihomo proxy")

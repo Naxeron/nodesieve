@@ -1,11 +1,9 @@
 """Basic URI parsing, protocol detection, host/port extraction, and node naming."""
 
 import base64
-import os
 import re
 import urllib.parse
 from typing import Optional, Tuple
-from nodesieve.constants import PROJECT_ROOT
 
 
 def get_flag_emoji(country_code: str) -> str:
@@ -26,11 +24,7 @@ def get_node_name(node_uri: str) -> str:
 
 
 def extract_node_protocol(node_uri: str) -> str:
-    """Identifies node protocol (AWG, WARP, VLESS, TROJAN, SS, etc.)."""
-    if node_uri.startswith("awg_conf:"):
-        return "AWG"
-    if node_uri.startswith("warp://"):
-        return "WARP"
+    """Identifies node protocol (VLESS, TROJAN, SS, etc.)."""
     if "://" in node_uri:
         proto = node_uri.split("://", 1)[0].upper()
         if proto == "SHADOWSOCKS":
@@ -51,10 +45,7 @@ def format_descriptive_node_name(
     proto = extract_node_protocol(node)
 
     orig_tag = ""
-    if node.startswith("awg_conf:"):
-        conf_file = node.split("awg_conf:", 1)[1].split("#", 1)[0]
-        orig_tag = conf_file
-    elif "#" in node:
+    if "#" in node:
         raw_tag = urllib.parse.unquote(node.split("#", 1)[1])
         proto_tag_match = re.search(r"\[[A-Za-z0-9_-]+:\s*([^\[\]]+)\]", raw_tag, flags=re.IGNORECASE)
         if proto_tag_match:
@@ -97,32 +88,6 @@ def format_descriptive_node_name(
 def extract_host_port(node_uri: str) -> Tuple[Optional[str], Optional[int]]:
     """Extracts server host/IP and integer port from any supported proxy URI scheme."""
     try:
-        if node_uri.startswith("warp://"):
-            parts = node_uri.split("warp://")[1].split("#")[0]
-            if "]" in parts:
-                h, p = parts.rsplit(":", 1)
-                return h.strip("[]"), int(p)
-            elif ":" in parts:
-                h, p = parts.rsplit(":", 1)
-                return h, int(p)
-            return None, None
-
-        if node_uri.startswith("awg_conf:"):
-            from nodesieve.parsers.awg import parse_amnezia_conf
-
-            try:
-                conf_name = node_uri.split("awg_conf:", 1)[1].split("#", 1)[0]
-                conf_path = os.path.join(PROJECT_ROOT, conf_name)
-                if not os.path.exists(conf_path) and os.path.exists(conf_name):
-                    conf_path = conf_name
-                if os.path.exists(conf_path):
-                    proxy = parse_amnezia_conf(conf_path)
-                    if proxy:
-                        return proxy.get("server"), proxy.get("port")
-            except Exception:
-                pass
-            return None, None
-
         clean_uri = node_uri.split("#", 1)[0].split("?", 1)[0]
         if "://" not in clean_uri:
             return None, None

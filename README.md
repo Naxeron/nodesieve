@@ -1,29 +1,29 @@
 # nodesieve
 
 nodesieve checks VPN proxy nodes by their exit IP — reachability, exit address,
-country and location agreement — measures performance, and deploys suitable nodes
-to an OpenWrt router using Mihomo. It also publishes them as a
-[subscription feed](#subscription-feed) that VPN apps, on a phone or anywhere else,
-can subscribe to.
+country and location agreement — measures performance, and publishes the working ones
+as a [subscription feed](#subscription-feed) that any VPN app can subscribe to. It runs
+on a computer, in [Termux on Android](#termux-android), and
+[on an OpenWrt router](#running-on-the-router) itself, which then keeps its own feed
+current.
 
 Also supports **Steer** from [Zapret Manager](https://github.com/StressOzz/Zapret-Manager):
-nodesieve ranks nodes by location agreement and supplies the servers of Steer's
-main section.
+nodesieve ranks nodes by location agreement for the servers of Steer's main section,
+which subscribes to the feed.
 
 ```sh
 pip install -r requirements.txt
 python -m nodesieve --add-sub "https://example.org/your-subscription"
 python -m nodesieve check
+python -m nodesieve serve
 ```
 
-Run the commands in the project directory. Use `check` to test and verify nodes. The
-default `run` action also deploys results to the configured router. `--help` lists
-every option.
+Run the commands in the project directory. `check`, the default action, tests the nodes
+and updates the feed; `serve` hands the feed to VPN apps. `--help` lists every option.
 
 ## Setup
 
-Developed and tested on Linux with Python 3.14. It also runs in Termux on Android,
-which needs a few extra steps: see [Termux (Android)](#termux-android).
+Developed and tested on Linux with Python 3.14, and on OpenWrt's Python 3.11.
 
 - **Mihomo.** Nodes are checked through local
   [Mihomo](https://github.com/MetaCubeX/mihomo) instances, each serving up to 32 of
@@ -41,54 +41,55 @@ which needs a few extra steps: see [Termux (Android)](#termux-android).
   the scan warns and tests the nodes from its last good download instead, and the
   saved copy is kept until a download succeeds again. Dead nodes in an old copy are
   dropped by the checks like any others. Delete `sub_cache/` to clear the cache.
-- **Router access.** Router validation and deployment reach the router at
-  `router_host` (default `192.168.1.1`) and log in over SSH as `router_ssh_user`
-  (default `root`). While `router_ssh_pass` is empty, which is the default, the SSH
-  agent and default key files are used. For password login, set `router_ssh_pass`
-  in `nodesieve_config.json` or pass `--router-ssh-pass` for a single run.
-- **WARP (optional).** `use_warp_scanner` adds Cloudflare WARP endpoints to a scan.
-  They connect with your own WARP registration, for example from a
-  [wgcf](https://github.com/ViRb3/wgcf) profile: put its private key in
-  `warp_private_key` and, for IPv6 inside the tunnel, its IPv6 address in
-  `warp_ipv6`. Without a key the WARP endpoints are skipped.
+- **Scan target.** A scan ranks one of two ways. The **Mihomo target**, the default,
+  ranks by exit country and download speed. The **Steer target** ranks by location
+  agreement, for [Steer's main pool](#steer-main-pool). `--target` picks one for a
+  single run.
 
-The files a scan writes (`apply_to_router.sh`, `steer-output/`, `feed/`,
-`crashed_nodes.txt`, `sub_cache/`) contain proxy credentials and are ignored by git as
-well.
+The files a scan writes (`feed/`, `crashed_nodes.txt`, `sub_cache/`) contain proxy
+credentials and are ignored by git, as is `steer-output/`, whose routing report holds
+none.
 
 ### Termux (Android)
 
-In [Termux](https://termux.dev), pip can't build psutil, because Python for Android
-reports its platform as `android`, and paramiko's cryptography, bcrypt and PyNaCl have no
-Android wheels. Install them from Termux's packages before the requirements:
+In [Termux](https://termux.dev), install from `requirements-termux.txt`, which pip
+installs by itself:
 
 ```sh
-pkg install git python python-psutil python-cryptography python-bcrypt python-pynacl curl jq
+pkg install git python
 git clone https://github.com/Naxeron/nodesieve ~/nodesieve
 cd ~/nodesieve
-pip install -r requirements.txt
+pip install -r requirements-termux.txt
 ```
+
+That covers scanning and the [subscription feed](#subscription-feed). Setting up the
+router from the phone with `install-router` also needs Paramiko, for SSH. Its
+cryptography, bcrypt and PyNaCl have no Android wheels, so install those from Termux's
+packages first:
+
+```sh
+pkg install python-cryptography python-bcrypt python-pynacl
+pip install paramiko
+```
+
+Without Paramiko, `install-router` says what to install.
 
 - **Keep the project in Termux's home directory.** Shared storage (`~/storage/shared`)
   is mounted `noexec`, so Mihomo can't run from there.
 - **Android's child process limit.** Android 12 and newer kill child processes when
-  more than 32 run across all apps, the oldest first, which can be Termux's shell and
-  nodesieve itself. A Mihomo scan stays well under it: it checks up to 64 nodes at once
-  through at most three Mihomo processes. ipregion does not: a Steer scan, and a Mihomo
-  scan with `enable_loc_ranking`, runs six ipregion probes at once, each with up to 16
-  parallel jobs of its own. For those scans, turn the limit off. On Android 14 and
-  newer, turn on Developer options → *Disable child process restrictions*. On Android
-  12L and 13, run
+  more than 32 run across all apps, the oldest first. A scan stays well under it, Steer
+  scans included: it checks up to 64 nodes at once through at most three Mihomo
+  processes, and asks the GeoIP providers from Python itself. If other apps run many
+  processes too, turn the limit off: on Android 14 and newer with Developer options →
+  *Disable child process restrictions*; on Android 12L and 13 with
   `adb shell "settings put global settings_enable_monitor_phantom_procs false"` from a
-  computer. For Android 12, see
+  computer; for Android 12, see
   [these notes by a Termux maintainer](https://github.com/agnostic-apollo/Android-Docs/blob/master/en/docs/apps/processes/phantom-cached-and-empty-processes.md#how-to-disable-the-phantom-processes-killing).
 - **DNS.** Mihomo finds no `/etc/resolv.conf` on Android and would look host names up
   through 114.114.114.114 and 8.8.8.8 itself. So on Android, nodesieve resolves each
   node's server through Android's resolver and passes the addresses to Mihomo. Private
   DNS, a VPN's DNS, and networks that block other DNS servers then work as they do for
   every other app.
-- **Router validation and deployment** work as on a computer when the phone can reach
-  the router, for example over the router's Wi-Fi.
 - **Scan with your VPN app off, or with Termux excluded from it** (the app's per-app
   proxy or split tunnelling setting). While a VPN app is connected, Termux's connections
   go through it too, so every node would be checked through your current VPN instead of
@@ -97,6 +98,35 @@ pip install -r requirements.txt
   second Termux session and subscribe the app to an address it prints; see
   [Subscription feed](#subscription-feed). Termux has to keep running in the background
   for the app's updates to reach it.
+
+#### Serving and scanning in the background
+
+To serve the feed from boot and scan on a schedule, install the
+[Termux:Boot](https://wiki.termux.com/wiki/Termux:Boot) app from the same place as
+Termux, open it once, and in Termux run:
+
+```sh
+pkg install cronie termux-services
+mkdir -p ~/.termux/boot
+cat > ~/.termux/boot/nodesieve <<'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+termux-wake-lock
+. $PREFIX/etc/profile
+cd ~/nodesieve && nohup python -m nodesieve serve >> ~/nodesieve-serve.log 2>&1 &
+EOF
+chmod +x ~/.termux/boot/nodesieve
+```
+
+Then restart Termux, run `sv-enable crond`, and add the scan to the crontab with
+`crontab -e`:
+
+```text
+PATH=/data/data/com.termux/files/usr/bin
+0 */6 * * * cd ~/nodesieve && python -m nodesieve check > ~/nodesieve-scan.log 2>&1
+```
+
+`termux-wake-lock` keeps Android from pausing Termux. Exclude Termux from battery
+optimization as well, or Android may stop it anyway.
 
 ## What is checked
 
@@ -131,7 +161,7 @@ consensus, with its agreement and vote count.
 ### How a node is connected
 
 Each link is translated into a Mihomo proxy, so a node is checked the way Mihomo
-connects to it, here and on the router. Links are read as Xray writes them: TCP,
+connects to it. Links are read as Xray writes them: TCP,
 WebSocket, gRPC and XHTTP transports, including the request shaping in an XHTTP
 link's `extra`, and `vcn`, the certificate name of a node that is addressed by IP.
 A link's `fm` settings (Xray's finalmask, for example TLS ClientHello fragmentation)
@@ -143,8 +173,8 @@ except VLESS with XTLS Vision. Multiplexing only works when the node's server
 supports it, which a link doesn't say, and a server without it, which includes every
 Xray server, drops each multiplexed connection. So a node is always checked without
 multiplexing. One that qualifies is then asked for a single request through it and
-keeps multiplexing, in the speedtest and on the router, only if it answers; the scan
-reports how many nodes do. Set `use_mux` to `false` in `nodesieve_config.json` to
+keeps multiplexing, in the speedtest and in the feed's Clash profile, only if it
+answers; the scan reports how many nodes do. Set `use_mux` to `false` in `nodesieve_config.json` to
 skip that request. Steer connects with its own core, so a Steer scan never asks.
 
 ### Local Mihomo instances
@@ -173,11 +203,8 @@ once, through one instance.
 
 ### Mihomo target
 
-After the IP check, surviving nodes are staged on the router and kept only if they
-answer a connectivity probe through the router's own WAN (`--no-router-validation`
-skips this). The top nodes by measured download speed are written to
-`apply_to_router.sh` and the [subscription feed](#subscription-feed) and, with `run`,
-deployed over SSH with a syntax pre-flight and automatic rollback.
+After the IP check, the working nodes are speed-tested, and the 30 fastest go to the
+[subscription feed](#subscription-feed).
 
 ## Subscription feed
 
@@ -192,12 +219,11 @@ with any of them:
 | `links-base64.txt` | The same list, base64-encoded | Apps that read only that |
 | `clash.yaml` | A complete Clash/Mihomo profile | Clash Meta for Android, FlClash and other Clash apps |
 
-The feed holds the nodes a scan would deploy, in the same order: the top nodes by
-speed for the Mihomo target, the ranked main pool for Steer. The profile's `Auto` group
-uses the first node in that order that answers, and the `nodesieve` group in front of
-it lets you pick a node by hand. Multiplexing is on only for nodes whose server answered
-through it in the scan. WARP and AmneziaWG nodes stay out: they use this computer's
-keys and have no share link.
+The feed holds the scan's result, in its order: the 30 fastest working nodes for the
+Mihomo target, the ranked main pool for Steer. The profile's `Auto` group uses the first
+node in that order that answers, and the `nodesieve` group in front of it lets you pick
+a node by hand. Multiplexing is on only for nodes whose server answered through it in
+the scan. Only VLESS, Trojan and Shadowsocks links go in.
 
 A scan that finds nothing leaves the feed as it was, so subscribed apps keep the nodes
 of the last scan that found some. The scan says how old they are.
@@ -221,10 +247,61 @@ setting of their own.
   network who learns the address can then read the nodes. `--feed-port` (or
   `feed_port`) changes the port.
 - **Credentials.** The feed holds proxy credentials. Its files are readable only by
-  you, and git ignores `feed/`. To change the address, clear `feed_token` and restart
+  you, unless `feed_dir` is a directory others may enter, as a web server's must be,
+  and git ignores `feed/`. To change the address, clear `feed_token` and restart
   `serve`; subscribed apps then need the new one.
 - **Elsewhere.** `feed_dir` writes the feed to another directory; a relative path is
   taken from the project directory.
+- **After a scan.** `feed_command` is a shell command run after each scan that updated
+  the feed, except with `--dry-run`, for example to have an app fetch it right away.
+  If it fails, the scan says so, and its result stands.
+
+## Running on the router
+
+nodesieve can run on an OpenWrt router itself, so that the router scans from its own
+connection and keeps its feed current without a computer. From a computer or phone
+that reaches the router over SSH, run:
+
+```sh
+python -m nodesieve install-router
+```
+
+It logs in to `router_host` (default `192.168.1.1`) as `router_ssh_user` (default
+`root`), with `router_ssh_pass` or, while that is empty, the SSH agent and default key
+files, then:
+
+1. **Packages.** Installs `python3`, `python3-aiohttp` and `python3-yaml` with opkg or
+   apk, where they are missing.
+   With the Mihomo binary the first scan downloads, nodesieve takes about 150 MB of the
+   router's storage.
+2. **Code.** Copies the code of this checkout to `/opt/nodesieve`. The repository is
+   private, so the router can't download it itself.
+3. **Settings.** On the first install, creates the router's settings from this
+   computer's: the same subscriptions and scan preferences, without router
+   credentials. The feed goes to `/www/nodesieve/<token>/`, where the router's web
+   server serves it to the local network.
+4. **Schedule.** Schedules `check` every 6 hours with cron (`--scan-every` takes 1, 2,
+   3, 4, 6, 8, 12 or 24, or 0 for no schedule). A scan that would start while the last
+   one is still running is skipped. Scans log to `/tmp/nodesieve.log` on the router.
+
+When it's done, it prints the feed's addresses and how to run a scan right away. With
+`--dry-run` it only looks at the router and says what it would do.
+
+- **Running it again** updates the code and the schedule and keeps the router's
+  settings. Change those on the router, for example with `python3 -m nodesieve
+  --add-sub <url>` in `/opt/nodesieve`.
+- **Removing it.** `--remove` deletes nodesieve, its settings, feed and schedule from
+  the router and leaves the packages.
+- **Bandwidth.** A Mihomo-target scan speed-tests every node that passes, downloading
+  up to 25 MB through each, so a scan of 40 nodes can download about 1 GB. Choose the
+  schedule with that in mind.
+
+**Steer.** With Zapret Manager on the router, the router's settings get a
+`feed_command` that asks Steer to fetch its subscription after each scan that updated
+the feed. Steer itself is not changed. Once, in the panel (Steer, Connection tab),
+subscribe its main section to the address `install-router` prints:
+`http://127.0.0.1/nodesieve/<token>/links.txt`. When Steer is busy or a download
+fails, it keeps the servers it has.
 
 ## Steer main pool
 
@@ -235,31 +312,32 @@ python -m nodesieve routing
 python -m nodesieve check
 ```
 
-Steer mode supplies the servers of Steer's **main section**. The menu edits excluded
+Steer mode ranks the servers of Steer's **main section**. The menu edits excluded
 countries, an optional country allowlist, the agreement threshold and the minimum
 report count. Blank input keeps the current setting; `-` clears a country list.
-The existing Mihomo workflow remains the default until you enable Steer.
+Scans use the Mihomo target until you enable Steer.
 
 The default exclusions are **RU, BY, CN, IR, KP, SY, CU**. Eligible exits need at
-least **60% country agreement** and **3 valid country reports per IP family**,
-using the bundled [ipregion.sh](https://github.com/vernette/ipregion) GeoIP
-providers (its `geoip` group). Agreement is the number of reports for the
-most reported country divided by all valid country reports: 3 of 5 means 60%.
+least **60% country agreement** and **3 valid country reports per IP family**
+from 16 GeoIP providers: those of [ipregion](https://github.com/vernette/ipregion)'s
+`geoip` group, asked the way ipregion asks them. Agreement is the number of reports
+for the most reported country divided by all valid country reports: 3 of 5 means 60%.
 IPv4 and IPv6 are checked separately. Tied leading countries, unknown countries,
 excluded countries, and insufficient evidence cannot qualify. An allowlist, when
 set, further limits eligible countries. The global `--countries` restriction does
 not apply to Steer.
 
 The scan shows the winning country, agreement percentage, and vote count for
-each node. Missing/failed reports do not vote. GeoIP checks run through each
-node's proxy with six concurrent ipregion processes, five seconds for each of
-their requests and a three-minute limit per probe; a timeout or missing
-dependency leaves a node's location unknown.
-The required tools are Bash 4.4 or newer, curl, and jq. The scanner does not
-install packages or prompt while scanning. The bundled script must be an
-ipregion release that prints JSON report version 2.
+each node. Missing/failed reports do not vote. Every request goes through the
+node, six nodes at a time with up to 16 requests each, and may take five
+seconds; a probe that doesn't finish within a minute leaves the node's location
+unknown. The address the providers look up is the one identity services such as
+icanhazip.com see. Some nodes leave through different addresses for different
+destinations, a server in one country sending some traffic out directly and the
+rest abroad: their location is that of the address identity services see, even
+where Cloudflare's trace sees another.
 
-The server list contains **all nodes that pass the country and evidence
+The list in the feed contains **all nodes that pass the country and evidence
 requirements**, ordered by country agreement, then the number of valid reports,
 then latency. Which of them carries traffic is Steer's own server selection
 setting: "first working" follows this order, so the best-agreed node is used while
@@ -277,64 +355,20 @@ These preferences live under `routing.main` in `nodesieve_config.json`; see
 }
 ```
 
-### Export and deployment
+### Report
 
-`check` writes three files to `steer-output/` when the main pool has qualifying
-proxies:
-
-- `routing-report.json` explains exclusions and records country evidence and
-  latency. It does not contain proxy credentials.
-- `steer-servers.txt` is the ranked server list, one link per line. It can also be
-  pasted by hand into the panel (Steer → Connection → VPN).
-- `apply_steer.sh` is the script that deployment runs on the router.
-
-The last two contain credentials and are created with restricted permissions. If
-a new scan finds no qualifying proxy, the old script and list are removed and
-nothing is deployed: there is no fallback to an unqualified proxy.
-
-After inspecting the report, deploy with:
-
-```sh
-python -m nodesieve deploy
-```
-
-The default `run` action performs both checking and deployment. `--dry-run` runs
-checks and exports without SSH changes; `deploy --dry-run` checks artifact age,
-integrity, and matching preferences without connecting. Deployment refuses results
-older than 24 hours or generated for different preferences/router.
+`check` writes `steer-output/routing-report.json` (`--output-dir` puts it elsewhere).
+It explains each exclusion and records the country evidence and latency of each node
+that qualified, without proxy credentials. The ranked list itself goes to the
+[subscription feed](#subscription-feed), which Steer subscribes to; see
+[Running on the router](#running-on-the-router). A scan that finds no qualifying proxy
+fails and leaves the feed as it was.
 
 For one-off use without saving preferences:
 
 ```sh
-python -m nodesieve check --target steer --output-dir steer-output
-python -m nodesieve deploy --target steer --output-dir steer-output
+python -m nodesieve check --target steer
 python -m nodesieve --routing-show
-```
-
-Deployment streams the script to the router over SSH. The script never edits
-Steer's files: it hands the list to Zapret Manager's own panel backend, the same
-way the panel's Connection tab does (behaviour read from
-[Zapret Manager v5.085](https://github.com/StressOzz/Zapret-Manager/blob/1ff3f5aa01e85125548eccc0a1dd6229a99123fb/ZapretManager_LuCI.sh)),
-so the panel validates the links, installs any core plugin they need and applies
-them. In order, it:
-
-1. Requires the main section to be connected through **VPN** already. A main section
-   on WARP or an AmneziaWG interface is left alone; connect it to VPN in the panel
-   once.
-2. Remembers what the section uses now, a subscription link or its own servers.
-3. **Replaces the servers of the main section with the scanned list.** A subscription
-   connected there is replaced too and no longer updates itself; nodesieve becomes
-   the source of the list. Services, devices, exclusions and other sections are not
-   touched.
-4. Waits for the panel to finish and checks that Steer shows the new list.
-5. If applying fails, puts the previous subscription or servers back and reports the
-   panel's own log lines.
-
-To see whether the router is ready without changing anything, run the script
-with `PSC_CHECK_ONLY=1`; it stops after step 2:
-
-```sh
-ssh root@192.168.1.1 'PSC_CHECK_ONLY=1 sh -s' < steer-output/apply_steer.sh
 ```
 
 ### What the checks establish
@@ -342,58 +376,12 @@ ssh root@192.168.1.1 'PSC_CHECK_ONLY=1 sh -s' < steer-output/apply_steer.sh
 - **Location:** country agreement is evidence about where GeoIP providers place
   an exit IP. It is not a guarantee that any website or service will allow access
   from it.
-- **Location of checks:** Steer probes run on this computer. The Mihomo router
-  validator is skipped because it stages nodes on Mihomo, not on Steer.
-  Subscription nodes supported by nodesieve's Steer export are VLESS, Trojan, and
-  Shadowsocks; local AWG/WARP pseudo-URLs cannot be exported as server links.
+- **Location of checks:** the checks run where nodesieve runs, through that
+  device's connection: on the router, from the router's own. Steer takes VLESS,
+  Trojan and Shadowsocks nodes.
 - **Freshness:** Steer keeps choosing among the scanned servers by reachability or
-  ping. It does not recheck location agreement or country exclusions. Rerun
-  `check` and `deploy` when those conditions change.
-- **Verification:** the script's read-only checks have run against a live router
-  (Zapret Manager v5.085, 2026-11-17), which also has every panel command the
-  script uses. Replacing the servers has only been tested against a stand-in for
-  the panel backend.
-
-## Upgrading from earlier versions
-
-**Proxy Site Checker was renamed to nodesieve:**
-
-- Run `python -m nodesieve` where you ran `python check_proxy_sites.py`. The actions
-  and options are the same.
-- The Python package `proxy_sites` is now `nodesieve`.
-- Settings move from `proxy_sites_config.json` to `nodesieve_config.json`: the first
-  run renames the file, so subscriptions and router credentials carry over. If both
-  files exist, only `nodesieve_config.json` is read. A `--config-file` is used as given.
-
-Earlier versions also probed Gemini, Twitter/X, ChatGPT, Grok and Discord, and
-deployed to Forkozz (NetShift) with a separate route for each. Both are gone:
-
-- **Forkozz export was replaced by Steer.** `routing.target` is now `"steer"`; a
-  saved `"forkozz"` is read as `"steer"`. `--target forkozz`, `--forkozz-config` and
-  the `forkozz_config` setting no longer exist, and output goes to `steer-output/`
-  instead of `forkozz-output/`. Nothing on a Forkozz router is changed any more,
-  including the `psc_*` service sections an earlier deployment created there.
-- `routing.services` in an existing configuration is ignored and dropped the next
-  time the configuration is saved. `routing.main.mode` is no longer a setting:
-  `"location"` is accepted and dropped, while `"preserve"` is refused, because
-  routing now only manages the main pool — remove it and keep routing disabled to
-  leave the main servers untouched.
-- The Mihomo router configuration no longer opens the extra verification listener
-  on port 7891, and `--router-test-port` no longer exists.
-
-**Nodes share local Mihomo instances**, up to 32 each, instead of one instance per node
-(see [Local Mihomo instances](#local-mihomo-instances)):
-
-- A scan runs a few Mihomo processes instead of one for every node it checks at once,
-  so it fits a router's memory. `mem_per_worker` now counts only a node's share; each
-  instance is counted on its own.
-- On Android a Mihomo scan checks up to 64 nodes at once instead of 24.
-- A node whose link Mihomo can't use is recorded in `crashed_nodes.txt` with Mihomo's
-  reason. It used to be checked over a direct connection, Mihomo's fallback for a proxy
-  list it can't load, and dropped as an IP leak.
-
-See [PROJECT.md](PROJECT.md) for pipeline
-architecture and [TEST_INFRA.md](TEST_INFRA.md) for testing details.
+  ping. It does not recheck location agreement or country exclusions; the next scan
+  does.
 
 ## Tests
 
@@ -402,31 +390,27 @@ pip install pytest
 python -m pytest
 ```
 
-Most of the suite runs offline, but two groups are hardware tests that run whenever
-a device answers at `192.168.1.1`. `tests/test_live_router_smoke.py` queries the
-router's Mihomo API, proxy port and SSH service. `TestStreamFileToRouterHardware`
-logs in over SSH as `root`, then writes and removes temporary files in the router's
-`/tmp`. To leave the router alone:
+The suite runs offline, except `TestStreamFileToRouterHardware`, which runs whenever a
+device answers at `192.168.1.1`: it logs in over SSH as `root` with the SSH agent or
+default key files, then writes and removes temporary files in the router's `/tmp`. To
+leave the router alone:
 
 ```sh
-python -m pytest --ignore=tests/test_live_router_smoke.py --deselect tests/test_router_adversarial.py::TestStreamFileToRouterHardware
+python -m pytest --deselect tests/test_router_adversarial.py::TestStreamFileToRouterHardware
 ```
 
-The hardware tests log in with the SSH agent or default key files. The smoke test
-uses a password instead when `ROUTER_SSH_PASS` is set.
-
 Each test gets an empty temporary project directory, so a test run doesn't write
-to your `apply_to_router.sh`, `crashed_nodes.txt` or `sub_cache/`. If a test changes
-a file in the project directory anyway, the run fails and lists the file.
+to your `feed/`, `crashed_nodes.txt` or `sub_cache/`. If a test changes a file in the
+project directory anyway, the run fails and lists the file. See [PROJECT.md](PROJECT.md)
+for the architecture and [TEST_INFRA.md](TEST_INFRA.md) for the tests.
 
 ## Updating dependencies
 
-- **ipregion.sh:** `python update_ipregion.py` replaces the bundled script with the
-  latest one from [vernette/ipregion](https://github.com/vernette/ipregion) and
-  updates the commit recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-  A version that prints another JSON report version, has no `geoip` group or has a
-  syntax error is refused, and the bundled script stays as it is. Review an update
-  with `git diff`, then commit it.
+- **GeoIP providers** are listed in `nodesieve/location.py`, with their addresses,
+  headers and demo keys, as of the ipregion commit recorded in
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). When a provider changes its API
+  or a demo key stops working, it stops voting; change its entry there, or compare
+  with the `geoip` checks of a newer ipregion.
 - **Python packages** are not pinned: `pip install -U -r requirements.txt` brings
   them up to date.
 - **Mihomo** is downloaded only while the project directory has no `mihomo` binary.
@@ -434,7 +418,7 @@ a file in the project directory anyway, the run fails and lists the file.
 
 ## Third-party software
 
-`ipregion.sh` is an unmodified copy of [ipregion](https://github.com/vernette/ipregion)
-by vernette, under the MIT License; see
+The location checks are adapted from the GeoIP checks of
+[ipregion](https://github.com/vernette/ipregion) by vernette, under the MIT License; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Mihomo is not included and is
 downloaded at run time.

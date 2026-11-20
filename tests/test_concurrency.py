@@ -1,7 +1,11 @@
 """Unit tests for async stream teardown, port pool allocation, and caching patterns."""
 
 import asyncio
+import time
 import unittest
+from unittest import IsolatedAsyncioTestCase
+from unittest.mock import MagicMock, patch
+
 from nodesieve.core.mihomo import MihomoManager
 from nodesieve.geo import GeolocationService
 from nodesieve.logging import safe_close_writer
@@ -54,12 +58,14 @@ class TestConcurrency(unittest.TestCase):
             name_tr = await GeolocationService.get_country_name("TR")
             self.assertEqual(name_tr, "Türkiye")
 
+        asyncio.run(run())
+
     def test_mihomo_runner_cleanup_on_aenter_exception(self):
         async def run():
             from nodesieve.core.mihomo import MihomoRunner
 
             initial_ports = set(MihomoManager._allocated_ports)
-            runner = MihomoRunner("awg_conf:non_existent_file.conf#Invalid", config={})
+            runner = MihomoRunner("vless://no-server-here#Invalid", config={})
             with self.assertRaises(Exception):
                 async with runner:
                     pass
@@ -131,6 +137,68 @@ class TestConcurrency(unittest.TestCase):
         decoded = base64.b64decode(cleaned_b64).decode("utf-8", errors="ignore")
         self.assertIn("vless://", decoded)
         self.assertIn("trojan://", decoded)
+
+
+class TestConcurrencyStress(IsolatedAsyncioTestCase):
+    """The .agents/AGENTS.md rules under load."""
+
+    async def test_ephemeral_port_stress_50_concurrent_allocations(self):
+        """Rule 2: 50 allocations, each with a live server on it, never collide."""
+        ports = []
+        servers = []
+        try:
+            for _ in range(50):
+                p = MihomoManager.get_free_port()
+                self.assertNotIn(p, ports, f"Port collision detected for port {p}!")
+                ports.append(p)
+                servers.append(await asyncio.start_server(lambda r, w: None, "127.0.0.1", p))
+            self.assertEqual(len(set(ports)), 50)
+        finally:
+            for server, port in zip(servers, ports):
+                server.close()
+                await server.wait_closed()
+                MihomoManager.release_port(port)
+
+    async def test_safe_close_writer_50_concurrent_hanging_peers(self):
+        """Rule 1: 50 peers that never finish closing hold nobody up beyond the timeout."""
+        writers = []
+        for _ in range(50):
+            writer = MagicMock()
+
+            async def hang():
+                await asyncio.sleep(5.0)
+
+            writer.wait_closed = hang
+            writers.append(writer)
+        started = time.monotonic()
+        await asyncio.gather(*[safe_close_writer(writer, timeout=0.2) for writer in writers])
+        self.assertLess(time.monotonic() - started, 0.40)
+        for writer in writers:
+            writer.close.assert_called_once()
+
+    async def test_safe_close_writer_abrupt_disconnect_and_exceptions(self):
+        """Rule 1: a reset peer, a broken pipe and no writer at all are handled quietly."""
+        await safe_close_writer(None)
+        reset = MagicMock()
+
+        async def raise_reset():
+            raise ConnectionResetError("TCP Connection Reset by peer")
+
+        reset.wait_closed = raise_reset
+        await safe_close_writer(reset, timeout=0.2)
+        reset.close.assert_called_once()
+        broken = MagicMock()
+        broken.close.side_effect = BrokenPipeError("Broken Pipe")
+        await safe_close_writer(broken, timeout=0.2)
+
+    async def test_geolocation_service_single_attempt_lock_50_concurrent_failures(self):
+        """Rule 3: during an outage, 50 callers make one attempt and get the offline names."""
+        GeolocationService._country_attempted = False
+        with patch("aiohttp.ClientSession.get", side_effect=OSError("Network unreachable")) as fetch:
+            names = await asyncio.gather(*[GeolocationService.get_country_name("US") for _ in range(50)])
+        self.assertTrue(all(name == "United States" for name in names))
+        self.assertEqual(fetch.call_count, 1)
+        self.assertTrue(GeolocationService._country_attempted)
 
 
 if __name__ == "__main__":

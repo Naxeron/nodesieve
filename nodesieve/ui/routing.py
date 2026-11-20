@@ -82,10 +82,10 @@ def routing_menu(
     write = output_fn or print
     draft = deepcopy(config)
     draft["routing"] = normalize_routing(draft.get("routing"))
-    write("Set your preferences, enable Steer routing, then save. Saving does not deploy.")
+    write("Set your preferences, enable Steer routing, then save. Saving does not scan.")
     write("Main supplies the servers for the traffic already assigned to the main section of Steer.")
     write("Location agreement = reports for the leading country / all valid country reports.")
-    write("For example, 3 of 5 reports agreeing means 60%. ipregion is the primary source.")
+    write("For example, 3 of 5 reports agreeing means 60%. The reports come from 16 GeoIP providers.")
     write("IPv4 and IPv6 are checked separately. Ties, unknown country, and insufficient evidence do not qualify.")
     try:
         while True:

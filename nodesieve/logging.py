@@ -7,14 +7,43 @@ import sys
 import threading
 import time
 from typing import Dict, Optional
-import psutil
 
 # Safe Print / Progress lock
 _print_lock = threading.Lock()
 
+# Where Linux and Android report memory. psutil answers elsewhere (macOS, Windows, BSD).
+MEMINFO_PATH = "/proc/meminfo"
+# Assumed when neither answers: enough for a few workers, not more.
+UNKNOWN_MEMORY_MB = 1024.0
+
 
 def get_free_memory_mb() -> float:
-    """Returns available system memory in megabytes."""
+    """Available system memory in megabytes.
+
+    On Linux and Android this is MemAvailable from /proc/meminfo, which is also what
+    psutil reports there, so neither needs psutil (Termux can't build it). Kernels before
+    3.14 have no MemAvailable: free memory with buffers and page cache stands in for it.
+    """
+    fields: Dict[str, int] = {}
+    try:
+        with open(MEMINFO_PATH, encoding="ascii") as meminfo:
+            for line in meminfo:
+                name, _, rest = line.partition(":")
+                value = rest.split()
+                if value and value[0].isdigit():
+                    fields[name.strip()] = int(value[0])
+                if name == "MemAvailable":
+                    break
+    except (OSError, UnicodeDecodeError):
+        pass
+    if "MemAvailable" in fields:
+        return fields["MemAvailable"] / 1024
+    if "MemFree" in fields:
+        return (fields["MemFree"] + fields.get("Buffers", 0) + fields.get("Cached", 0)) / 1024
+    try:
+        import psutil
+    except ImportError:
+        return UNKNOWN_MEMORY_MB
     return psutil.virtual_memory().available / (1024 * 1024)
 
 

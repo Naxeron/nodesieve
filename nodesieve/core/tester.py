@@ -1,4 +1,4 @@
-"""Node testing routines: TCP ping, exit IP and country resolution, IPRegion location consensus, and speedtests."""
+"""Node testing routines: TCP ping, exit IP and country resolution, GeoIP location consensus, and speedtests."""
 
 import asyncio
 import re
@@ -7,7 +7,7 @@ import urllib.parse
 from typing import Optional, Set, Tuple
 import aiohttp
 
-from nodesieve.constants import GEOBLOCKED_REGIONS, IPREGION_SCRIPT_PATH
+from nodesieve.constants import GEOBLOCKED_REGIONS
 from nodesieve.core.mihomo import MihomoInstanceLost, MihomoRunner, NodeEndpoint
 from nodesieve.geo import GeolocationService
 from nodesieve.logging import ErrorTracker, safe_close_writer, safe_print
@@ -18,7 +18,7 @@ from nodesieve.parsers.base import (
 )
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict, without_mux
 from nodesieve.routing import main_policy_failure, normalize_routing
-from nodesieve.location import probe_ipregion
+from nodesieve.location import probe_location
 
 # Cloudflare's trace endpoint by address, one per IP family.
 TRACE_URL_IPV4 = "https://1.1.1.1/cdn-cgi/trace"
@@ -41,19 +41,17 @@ class NodeTester:
             self.config["routing"] = normalize_routing(self.config["routing"])
         self.total_nodes = total_nodes
         self.real_ip = real_ip
-        self.ipregion_path = IPREGION_SCRIPT_PATH
         self.node_metadata: dict = {}
         # Working nodes that were offered multiplexing, and how many of them answered through it.
         self.mux_offered = 0
         self.mux_supported = 0
 
-        self._ipregion_semaphore = asyncio.Semaphore(6)
+        # Nodes whose GeoIP providers are asked at once, each with up to
+        # location.REQUESTS_PER_NODE requests in flight.
+        self._location_semaphore = asyncio.Semaphore(6)
 
     async def async_check_tcp_node(self, node: str, timeout: float = 1.5) -> Optional[str]:
         """Phase 0 TCP Ping: Tests raw TCP port reachability."""
-        if node.startswith("awg_conf:"):
-            return node
-
         node_name = get_node_name(node)
         if "Авто" in node_name or "⬇" in node_name:
             return None
@@ -125,19 +123,20 @@ class NodeTester:
     async def fetch_location(
         self, base_port: int, ipv4_ip: Optional[str] = None, ipv6_ip: Optional[str] = None,
     ) -> dict:
-        """Collect independent GeoIP votes through this node's SOCKS5 listener."""
+        """Collect independent GeoIP votes through this node's local listener.
+
+        The families the Cloudflare trace reached the node in need a consensus; the
+        addresses the providers look up are found by the probe itself.
+        """
         families = [family for family, address in (("ipv4", ipv4_ip), ("ipv6", ipv6_ip)) if address]
-        async with self._ipregion_semaphore:
-            return await probe_ipregion(
-                self.ipregion_path, f"127.0.0.1:{base_port}", families=families,
-                real_ip=self.real_ip,
-            )
+        async with self._location_semaphore:
+            return await probe_location(f"http://127.0.0.1:{base_port}", families=families, real_ip=self.real_ip)
 
     async def fetch_loc_score(
         self, base_port: int, allowed: list,
         ipv4_ip: Optional[str] = None, ipv6_ip: Optional[str] = None,
     ) -> float:
-        """Legacy allowed-country agreement score, using ipregion's GeoIP reports."""
+        """Legacy allowed-country agreement score, using the GeoIP providers' reports."""
         if not allowed:
             return 0.0
         evidence = await self.fetch_location(base_port, ipv4_ip, ipv6_ip)
@@ -228,7 +227,6 @@ class NodeTester:
         node = self._as_checked(node)
         node_name = get_node_name(node)
         host, port = extract_host_port(node)
-        is_awg = node.startswith("awg_conf:")
 
         async def drop(label: str, reason: str, **details) -> None:
             # A Mihomo that exited fails a node too, which is not the node's doing.
@@ -267,12 +265,12 @@ class NodeTester:
                     ipv6_ip, ipv6_loc, v6_lat = results[1]
 
                 # Early abort if node has no outbound internet connectivity. The Steer
-                # main pool relies on ipregion's own discovery instead of this trace.
-                if not routing_enabled and not ipv4_ip and not ipv6_ip and not is_awg:
+                # main pool relies on the GeoIP probe's own exit discovery instead of this trace.
+                if not routing_enabled and not ipv4_ip and not ipv6_ip:
                     await drop("No outbound internet", "No outbound internet connectivity")
                     return None
 
-                if not is_awg and self.real_ip and (ipv4_ip == self.real_ip or ipv6_ip == self.real_ip):
+                if self.real_ip and (ipv4_ip == self.real_ip or ipv6_ip == self.real_ip):
                     await drop("IP leak", "Proxy leaks real IP")
                     return None
 
@@ -315,7 +313,7 @@ class NodeTester:
                     if not country_code and eff_v4:
                         country_code = await GeolocationService.get_ip_country(eff_v4)
 
-                    if not country_code and not is_awg:
+                    if not country_code:
                         loc_reason = "Could not determine node location"
                         await drop(loc_reason, loc_reason)
                         return None
@@ -436,9 +434,6 @@ class NodeTester:
             ) as runner:
                 proxy_url = runner.proxy_url
                 base_port = runner.port
-
-                if node.startswith("awg_conf:") or "wireguard" in node.lower():
-                    await asyncio.sleep(1.8)
 
                 allowed_countries = [c.upper() for c in self.config.get("allowed_countries", [])]
 

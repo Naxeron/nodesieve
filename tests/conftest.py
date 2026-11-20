@@ -1,8 +1,7 @@
 """Shared test setup: tests run against a temporary project directory, never the real one.
 
-The checker keeps its output in the project directory: apply_to_router.sh (which
-`deploy` pushes to the router as it is), crashed_nodes.txt, sub_cache/ and the
-default settings file. A test that wrote there would replace or truncate the
+The checker keeps its output in the project directory: the feed, crashed_nodes.txt,
+sub_cache/ and the default settings file. A test that wrote there would replace or truncate the
 user's real files, so every test gets an empty project directory of its own, and
 the run fails if any file in the real project directory changed anyway.
 """
@@ -20,13 +19,8 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT_USERS = (
     "nodesieve.core.fetcher",
     "nodesieve.core.mihomo",
-    "nodesieve.core.router_validator",
     "nodesieve.feed",
-    "nodesieve.parsers.base",
-    "nodesieve.router.pusher",
-    "nodesieve.router.script_generator",
     "nodesieve.ui.cli",
-    "nodesieve.ui.dashboard",
 )
 
 

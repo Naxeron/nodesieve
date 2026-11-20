@@ -1,231 +1,316 @@
-"""Location evidence is provider consensus, with bounded proxy-only subprocesses."""
+"""Location evidence: GeoIP providers asked through the node, and the consensus of their answers."""
 
 import asyncio
-import json
-import os
-from pathlib import Path
-import shutil
-import signal
-import tempfile
+import re
 import unittest
 import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from nodesieve.location import empty_location, parse_ipregion, probe_ipregion
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+import pytest
+
+from nodesieve import location
 from nodesieve.core.tester import NodeTester
+from nodesieve.location import (
+    LOOKUPS,
+    PROVIDERS,
+    ProxyClient,
+    empty_location,
+    location_evidence,
+    probe_location,
+)
 from nodesieve.routing import main_policy_failure, normalize_routing
 
-
-AUTO = object()
-
-
-def address(ip):
-    """ipregion's description of one exit address, or null when it found none."""
-    if not ip:
-        return None
-    return {"ip": ip, "asn": 64496, "org": "Example Hosting", "registered": "DE", "maxmind_failure": None}
+IPV4, IPV6 = "192.0.2.5", "2001:db8::5"
+POLICY = normalize_routing()["main"]
 
 
-def answer(country=None, reason=None):
-    return {"country": country, "access": None, "reason": reason}
+def reports(v4=("DE", "DE", "DE", "US"), v6=()):
+    """One report per provider and family, as query_providers gives them; None: a failed lookup."""
+    result = []
+    for family, countries in (("ipv4", v4), ("ipv6", v6)):
+        for index, country in enumerate(countries):
+            result.append({"provider": f"provider_{index}", "family": family, "country": country,
+                           "reason": None if country else "timeout"})
+    return result
 
 
-def cell(values, index):
-    """One provider's answer for a family; null when ipregion did not check that family."""
-    if not values:
-        return None
-    value = values[index] if index < len(values) else None
-    return answer(reason="timeout") if value is None else answer(value)
+def evidence(v4=("DE", "DE", "DE", "US"), v6=(), exits=None, families=None, real_ip=None):
+    exits = exits if exits is not None else {**({"ipv4": IPV4} if v4 else {}), **({"ipv6": IPV6} if v6 else {})}
+    return location_evidence(reports(v4, v6), exits, families if families is not None else list(exits), real_ip)
 
 
-def report(v4=("DE", "DE", "DE", "US"), v6=(), ipv4=AUTO, ipv6=AUTO, **extra):
-    """An ipregion version 2 JSON report as printed by `ipregion.sh -j -g geoip`."""
-    records = [{"id": f"provider_{i}", "service": f"provider-{i}", "ipv4": cell(v4, i), "ipv6": cell(v6, i),
-                "proxy": None} for i in range(max(len(v4), len(v6)))]
-    if ipv4 is AUTO:
-        ipv4 = "192.0.2.5" if v4 else None
-    if ipv6 is AUTO:
-        ipv6 = "2001:db8::5" if v6 else None
-    return {"version": 2, "ipv4": address(ipv4), "ipv6": address(ipv6),
-            "verdict": {"country": None, "tied": []}, "attention": [],
-            "results": {"platforms": [], "cdn": [], "availability": [], "ai": [], "geoip": records}, **extra}
-
+# The consensus
 
 class TestLocationConsensus(unittest.TestCase):
     def test_majority_and_private_summary(self):
-        evidence = parse_ipregion(report())
-        self.assertEqual((evidence["country"], evidence["score"], evidence["votes"], evidence["total"]), ("DE", .75, 3, 4))
-        self.assertEqual(evidence["counts"], {"DE": 3, "US": 1})
-        self.assertEqual(evidence["tested_families"], ["ipv4"])
-        self.assertNotIn("192.0.2.5", json.dumps(evidence))
-        self.assertIsNone(main_policy_failure(normalize_routing({})["main"], evidence))
+        result = evidence()
+        self.assertEqual((result["source"], result["country"], result["score"], result["votes"], result["total"]),
+                         ("geoip", "DE", .75, 3, 4))
+        self.assertEqual(result["counts"], {"DE": 3, "US": 1})
+        self.assertEqual(result["tested_families"], ["ipv4"])
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn(IPV4, repr(result))
+        self.assertIsNone(main_policy_failure(POLICY, result))
 
     def test_ties_are_unknown(self):
-        evidence = parse_ipregion(report(("DE", "US")))
-        self.assertIsNone(evidence["country"])
-        self.assertEqual(evidence["status"], "unknown")
-        self.assertEqual(evidence["score"], .5)
+        result = evidence(("DE", "US"))
+        self.assertIsNone(result["country"])
+        self.assertEqual(result["status"], "unknown")
 
-    def test_statuses_non_countries_and_other_groups_do_not_vote(self):
-        data = report(("DE", "Timeout", "Error", "XX", "ZZ", "EU", "AP", "UN", "N/A", "", None, 42))
-        extra = {"id": "extra", "service": "extra", "ipv4": answer("US"), "ipv6": None, "proxy": None}
-        for group in ("platforms", "cdn", "availability", "ai"):
-            data["results"][group] = [extra] * 50
-        # An answer that is not tied to an IP family is not evidence for either one.
-        data["results"]["geoip"].append(
-            {"id": "unplaced", "service": "unplaced", "ipv4": None, "ipv6": None, "proxy": answer("US")})
-        self.assertEqual(parse_ipregion(data)["counts"], {"DE": 1})
+    def test_failed_lookups_and_non_countries_do_not_vote(self):
+        result = evidence(("DE", "DE", "DE", None, "XX", "T1", "de", "Germany"))
+        self.assertEqual(result["counts"], {"DE": 3})
 
-    def test_failed_lookups_and_the_family_a_proxy_did_not_use_do_not_vote(self):
-        data = report(("DE",) * 4, ("DE",) * 4)
-        rows = data["results"]["geoip"]
-        rows[0]["ipv4"] = answer(reason="proxy picked IPv6")
-        rows[1]["ipv6"] = answer(reason="rate limited (429)")
-        evidence = parse_ipregion(data)
-        self.assertEqual(evidence["families"]["ipv4"]["counts"], {"DE": 3})
-        self.assertEqual(evidence["families"]["ipv6"]["counts"], {"DE": 3})
-        self.assertEqual((evidence["country"], evidence["total"]), ("DE", 6))
-        self.assertEqual(evidence["tested_families"], ["ipv4", "ipv6"])
-
-    def test_duplicates_count_once_and_conflicting_duplicate_is_excluded(self):
-        data = report(("DE", "DE", "US"))
-        rows = data["results"]["geoip"]
-        rows += [dict(rows[0])] * 8
-        rows.append({"id": "PROVIDER_1", "service": "provider-1", "ipv4": answer("US")})
-        evidence = parse_ipregion(data)
-        self.assertEqual(evidence["counts"], {"DE": 1, "US": 1})
-        self.assertEqual(evidence["total"], 2)
+    def test_duplicates_count_once_and_conflicting_duplicates_are_excluded(self):
+        doubled = reports(("DE", "DE", "DE")) + [
+            {"provider": "provider_0", "family": "ipv4", "country": "DE"},
+            {"provider": "Provider_1", "family": "ipv4", "country": "US"},
+        ]
+        result = location_evidence(doubled, {"ipv4": IPV4}, ["ipv4"])
+        self.assertEqual(result["counts"], {"DE": 2})
 
     def test_each_family_remains_independent(self):
-        evidence = parse_ipregion(report(("DE",) * 6, ("RU",) * 3))
-        self.assertEqual(evidence["country"], "DE")
-        self.assertEqual(evidence["families"]["ipv6"]["country"], "RU")
-        self.assertIsNotNone(main_policy_failure(normalize_routing({})["main"], evidence))
+        result = evidence(("DE",) * 3, ("US",) * 3)
+        self.assertEqual(result["families"]["ipv4"]["country"], "DE")
+        self.assertEqual(result["families"]["ipv6"]["country"], "US")
+        self.assertIsNone(result["country"])
 
-    def test_missing_known_family_cannot_be_hidden(self):
-        evidence = parse_ipregion(report(), families=["ipv4", "ipv6"])
-        self.assertEqual(evidence["tested_families"], ["ipv4", "ipv6"])
-        self.assertEqual(evidence["families"]["ipv6"]["total"], 0)
-        self.assertIsNotNone(main_policy_failure(normalize_routing({})["main"], evidence))
+    def test_a_family_the_trace_found_cannot_be_hidden(self):
+        result = evidence(("DE",) * 3, exits={"ipv4": IPV4}, families=["ipv4", "ipv6"])
+        self.assertEqual(result["tested_families"], ["ipv4", "ipv6"])
+        self.assertIn("IPV6", main_policy_failure(POLICY, result))
 
-    def test_discovered_family_without_votes_is_still_required(self):
-        evidence = parse_ipregion(report(ipv6="2001:db8::1"))
-        self.assertEqual(evidence["tested_families"], ["ipv4", "ipv6"])
-        self.assertEqual(evidence["families"]["ipv6"]["country"], None)
+    def test_a_discovered_family_without_votes_is_still_required(self):
+        result = evidence(("DE",) * 3, exits={"ipv4": IPV4, "ipv6": IPV6}, families=["ipv4"])
+        self.assertEqual(result["tested_families"], ["ipv4", "ipv6"])
+        self.assertIn("IPV6", main_policy_failure(POLICY, result))
 
-    def test_real_ip_leak_and_malformed_json_fail_closed(self):
-        evidence = parse_ipregion(report(), real_ip="192.0.2.5")
-        self.assertTrue(evidence["ip_leak"])
-        self.assertEqual(evidence["status"], "failed")
-        for invalid in (b"", "{}", "[]", "not json", {"version": 2, "results": {"geoip": None}}):
-            self.assertEqual(parse_ipregion(invalid)["status"], "failed")
+    def test_an_exit_at_this_computers_address_is_a_leak(self):
+        result = evidence(real_ip="192.0.2.5")
+        self.assertTrue(result["ip_leak"])
+        self.assertEqual((result["status"], result["reason"]), ("failed", "Proxy leaks real IP"))
+        self.assertEqual(main_policy_failure(POLICY, result), "Location probe detected an IP leak")
 
-    def test_report_from_another_ipregion_version_fails_closed(self):
-        version_1 = {"version": 1, "ipv4": "192.0.2.5", "ipv6": None,
-                     "results": {"primary": [{"service": "MAXMIND", "ipv4": "DE", "ipv6": None}] * 4}}
-        for other in (version_1, {**report(), "version": 3}, {**report(), "version": None}):
-            evidence = parse_ipregion(other)
-            self.assertEqual(evidence["status"], "failed")
-            self.assertIn("version", evidence["reason"])
-            self.assertEqual(evidence["total"], 0)
+    def test_evidence_from_elsewhere_does_not_qualify(self):
+        result = {**evidence(("DE",) * 3), "source": "ipregion"}
+        self.assertEqual(main_policy_failure(POLICY, result), "Location evidence missing")
 
 
-class TestLocationSubprocess(unittest.IsolatedAsyncioTestCase):
-    async def test_real_timeout_leaves_no_running_child_process(self):
-        bash = shutil.which("bash")
-        if not bash or not Path("/proc").is_dir():
-            self.skipTest("Requires Linux process groups and bash")
-        with tempfile.TemporaryDirectory() as directory:
-            script = Path(directory) / "probe.sh"
-            child_pid_file = Path(directory) / "child.pid"
-            script.write_text("#!/bin/bash\n(trap '' TERM; echo $BASHPID > \"$PSC_CHILD_PID\"; sleep 30) &\nwait\n")
-            with patch.dict(os.environ, {"PSC_CHILD_PID": str(child_pid_file)}), \
-                    patch("nodesieve.location.shutil.which", return_value=bash):
-                evidence = await probe_ipregion(script, "127.0.0.1:23456", timeout=.1)
-            self.assertEqual(evidence["reason"], "ipregion timed out")
-            self.assertTrue(child_pid_file.is_file())
-            status = Path("/proc") / child_pid_file.read_text().strip() / "status"
-            if status.exists():
-                self.assertRegex(status.read_text(), r"State:\s+Z\b")
+# Asking the providers
 
-    async def test_proxy_command_dependencies_and_no_bypass_environment(self):
-        process = MagicMock(pid=54321)
-        process.communicate = AsyncMock(return_value=(json.dumps(report()).encode(), b""))
-        # Only what the bundled script itself needs: column and nslookup are no longer used.
-        installed = {"bash", "jq", "curl"}
-        with patch("nodesieve.location.shutil.which",
-                   side_effect=lambda name: "/usr/bin/" + name if name in installed else None), \
-                patch("nodesieve.location.Path.is_file", return_value=True), \
-                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)) as spawn:
-            evidence = await probe_ipregion("/tmp/ipregion.sh", "127.0.0.1:23456", families=["ipv4"])
-        self.assertEqual(evidence["country"], "DE")
-        self.assertEqual(spawn.call_args.args, (
-            "/usr/bin/bash", "/tmp/ipregion.sh", "-p", "127.0.0.1:23456", "-j", "-g", "geoip", "-t", "5"))
-        self.assertNotIn("-4", spawn.call_args.args)
-        self.assertNotIn("-6", spawn.call_args.args)
-        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
-        self.assertEqual(spawn.call_args.kwargs["stdin"], asyncio.subprocess.DEVNULL)
-        self.assertEqual(spawn.call_args.kwargs["env"]["NO_PROXY"], "")
+ANSWERS = {
+    # The node's IPv4 exit; it has no IPv6 unless a test answers for ipv6.icanhazip.com.
+    "ipv4.icanhazip.com": IPV4 + "\n",
+    "www.cloudflare.com/cdn-cgi/trace": f"fl=1\nip={IPV4}\nloc=DE\n",
+    "rdap.db.ripe.net/ip/": '{"country": "DE"}',
+    "ipinfo.io/widget/demo/": '{"data": {"country": "DE"}}',
+    "api.ipregistry.co/": '{"location": {"country": {"code": "DE"}}}',
+    "ipapi.co/": '{"country": "DE"}',
+    "ifconfig.co/country-iso": "DE\n",
+    "api.ip2location.io/?ip=": '{"country_code": "DE"}',
+    "api.country.is/": '{"country": "DE"}',
+    "api.geoapify.com/v1/ipinfo": '{"country": {"iso_code": "DE"}}',
+    "get.geojs.io/": '[{"country": "DE"}]',
+    "api.ipbase.com/": '{"data": {"location": {"country": {"alpha2": "DE"}}}}',
+    "api.ipquery.io/": '{"location": {"country_code": "DE"}}',
+    "ipwho.is/": '{"country_code": "DE"}',
+    "demo.ip-api.com/": '{"countryCode": "DE"}',
+    "www.maxmind.com/en/geoip-web-services-demo": '<input type="hidden" value="c0ffee" name="csrf_token">',
+    "www.maxmind.com/en/geoip2/demo/token": (201, '{"token": "demo-token"}'),
+    "geoip.maxmind.com/geoip/v2.1/city/": '{"country": {"iso_code": "DE"}}',
+    "www.ip2location.com": "<script>\n  t: 1700000000,\n  token: 'beef42'\n</script>",
+    "api.ip2location.io/query/": '{"countryCode": "DE"}',
+}
 
-    async def test_probe_that_ends_without_a_report_gives_ipregions_reason(self):
-        process = MagicMock(pid=54321, returncode=1)
-        process.communicate = AsyncMock(return_value=(
-            b"", b"\x1b[31mError: failed to detect an external IP address, check the network connection\x1b[0m\n"))
-        with patch("nodesieve.location.shutil.which", return_value="/usr/bin/tool"), \
-                patch("nodesieve.location.Path.is_file", return_value=True), \
-                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)):
-            evidence = await probe_ipregion("/tmp/ipregion.sh", "127.0.0.1:23456", families=["ipv4"])
-        self.assertEqual(evidence["status"], "failed")
-        self.assertEqual(evidence["reason"],
-                         "ipregion: failed to detect an external IP address, check the network connection")
-        self.assertEqual(evidence["tested_families"], ["ipv4"])
 
-        process.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("nodesieve.location.shutil.which", return_value="/usr/bin/tool"), \
-                patch("nodesieve.location.Path.is_file", return_value=True), \
-                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)):
-            evidence = await probe_ipregion("/tmp/ipregion.sh", "127.0.0.1:23456")
-        self.assertEqual(evidence["reason"], "ipregion failed without a report")
+class FakeNode:
+    """Stands in for the requests through a node: answers by URL, records every request."""
 
-    async def test_missing_dependencies_do_not_launch_installer(self):
-        with patch("nodesieve.location.shutil.which", return_value=None), \
-                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
-            evidence = await probe_ipregion("ipregion.sh", "127.0.0.1:23456")
-        self.assertEqual(evidence["status"], "failed")
-        self.assertIn("Missing dependencies", evidence["reason"])
-        spawn.assert_not_awaited()
+    def __init__(self, **overrides):
+        self.answers = {**ANSWERS, **overrides}
+        self.requests = []
 
-    async def test_timeout_and_cancellation_kill_entire_process_group(self):
-        for cancel in (False, True):
-            with self.subTest(cancel=cancel):
-                started, finish = asyncio.Event(), asyncio.Event()
-                async def communicate():
-                    started.set()
-                    await finish.wait()
-                    return b"", b""
-                process = MagicMock(pid=54321)
-                process.communicate = communicate
-                process.wait = AsyncMock(return_value=-9)
-                def kill_group(pid, sig):
-                    if sig == signal.SIGTERM:
-                        finish.set()
-                with patch("nodesieve.location.shutil.which", return_value="/usr/bin/tool"), \
-                        patch("nodesieve.location.Path.is_file", return_value=True), \
-                        patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)), \
-                        patch("nodesieve.location.os.killpg", side_effect=kill_group) as kill:
-                    task = asyncio.create_task(probe_ipregion("/tmp/script.sh", "127.0.0.1:23456", timeout=.01))
-                    await started.wait()
-                    if cancel:
-                        task.cancel()
-                        with self.assertRaises(asyncio.CancelledError):
-                            await task
-                    else:
-                        self.assertEqual((await task)["reason"], "ipregion timed out")
-                self.assertEqual([call.args for call in kill.call_args_list], [(54321, signal.SIGTERM), (54321, signal.SIGKILL)])
+    async def request(self, method, url, headers=None, data=None):
+        self.requests.append({"method": method, "url": url, "headers": headers or {}, "data": data})
+        for key in sorted(self.answers, key=len, reverse=True):
+            if key in url:
+                answer = self.answers[key]
+                if isinstance(answer, BaseException):
+                    raise answer
+                if callable(answer):
+                    return answer(url)
+                return answer if isinstance(answer, tuple) else (200, answer)
+        raise aiohttp.ClientConnectionError("no such host")
 
+    def urls(self, part):
+        return [request["url"] for request in self.requests if part in request["url"]]
+
+
+def probe(node, families=("ipv4",), **options):
+    return asyncio.run(probe_location("http://127.0.0.1:1", families=families, client=node, **options))
+
+
+def votes(node):
+    """What each provider reported, per family: its country, or why it has none."""
+    reports, _ = asyncio.run(location.query_providers(node))
+    result = {}
+    for report in reports:
+        result.setdefault(report["family"], {})[report["provider"]] = report["country"] or report["reason"]
+    return result
+
+
+def dual_stack(**answers):
+    return FakeNode(**{"ipv6.icanhazip.com": IPV6 + "\n", **answers})
+
+
+def test_every_provider_is_asked_once_per_family_about_the_address_identity_services_see():
+    node = dual_stack()
+    found = votes(node)
+    assert set(found) == {"ipv4", "ipv6"}
+    for family in found:
+        assert set(found[family]) == set(PROVIDERS) and len(PROVIDERS) == 16
+    # The node reached Cloudflare over IPv4, so it counts there only.
+    assert (found["ipv4"]["Cloudflare"], found["ipv6"]["Cloudflare"]) == ("DE", "the node used its other family")
+    assert len(node.urls("www.cloudflare.com")) == 1
+    # Lookups name the exit address; ipinfo.io has a host of its own for IPv6.
+    assert node.urls("v6.ipinfo.io") == [f"https://v6.ipinfo.io/widget/demo/{IPV6}"]
+    assert f"https://ipwho.is/{IPV6}" in node.urls("ipwho.is")
+    # MaxMind's and ip2location.com's tokens are fetched once and used by both families.
+    assert len(node.urls("geoip-web-services-demo")) == len(node.urls("demo/token")) == 1
+    assert len(node.urls("www.ip2location.com")) == 1
+    cities = [request for request in node.requests if "geoip.maxmind.com" in request["url"]]
+    assert {request["headers"]["Authorization"] for request in cities} == {"Bearer demo-token"}
+    token_request = next(request for request in node.requests if "demo/token" in request["url"])
+    assert token_request["method"] == "POST" and token_request["headers"] == {"X-CSRF-Token": "c0ffee"}
+    queries = [request for request in node.requests if "ip2location.io/query" in request["url"]]
+    assert sorted(request["data"]["ip"] for request in queries) == sorted([IPV4, IPV6])
+    assert {(request["method"], request["data"]["t"], request["data"]["token"]) for request in queries} == {
+        ("POST", "1700000000", "beef42")}
+    assert next(r for r in node.requests if "ipapi.co" in r["url"])["headers"] == {"Referer": "https://ipapi.co/"}
+    assert next(r for r in node.requests if "ip-api.com" in r["url"])["headers"] == {"Origin": "https://ip-api.com"}
+
+
+def test_all_answers_make_one_consensus_per_family():
+    result = probe(dual_stack(), families=("ipv4", "ipv6"))
+    assert (result["country"], result["votes"], result["total"]) == ("DE", 31, 31)
+    assert {family: values["total"] for family, values in result["families"].items()} == {"ipv4": 16, "ipv6": 15}
+    assert main_policy_failure(POLICY, result) is None
+
+
+def test_the_first_identity_service_to_name_an_address_of_the_family_decides():
+    node = FakeNode(**{"ipv4.icanhazip.com": (500, ""), "api.ipify.org": "2001:db8::99",
+                       "ipv4.seeip.org": "192.0.2.77\n", "ipv6.icanhazip.com": "2001:db8::7\n",
+                       "api6.ipify.org": "192.0.2.99", "ipv6.wtfismyip.com": aiohttp.ClientConnectionError()})
+    _, exits = asyncio.run(location.query_providers(node))
+    assert exits == {"ipv4": "192.0.2.77", "ipv6": "2001:db8::7"}
+    assert "https://ipwho.is/2001:db8::7" in node.urls("ipwho.is")
+
+
+def test_a_family_the_ip_check_found_stays_required_without_an_identity_answer():
+    result = probe(FakeNode(), families=("ipv4", "ipv6"))
+    assert result["tested_families"] == ["ipv4", "ipv6"]
+    assert main_policy_failure(POLICY, result).startswith("IPV6:")
+
+
+def test_cloudflare_counts_unless_the_node_reached_it_through_the_other_family():
+    # A node that leaves through another address for Cloudflare still gets its vote,
+    # as with ipregion: only an address of the other family rules it out.
+    elsewhere = FakeNode(**{"www.cloudflare.com/cdn-cgi/trace": "ip=203.0.113.9\nloc=NL\n"})
+    assert votes(elsewhere)["ipv4"]["Cloudflare"] == "NL"
+    over_ipv6 = dual_stack(**{"www.cloudflare.com/cdn-cgi/trace": f"ip={IPV6}\nloc=NL\n"})
+    found = votes(over_ipv6)
+    assert (found["ipv4"]["Cloudflare"], found["ipv6"]["Cloudflare"]) == ("the node used its other family", "NL")
+    failing = FakeNode(**{"www.cloudflare.com/cdn-cgi/trace": (429, "")})
+    assert votes(failing)["ipv4"]["Cloudflare"] == "rate limited (429)"
+
+
+@pytest.mark.parametrize("answer,reason", [
+    ((403, '{"country": "DE"}'), "forbidden (403)"),
+    ((429, ""), "rate limited (429)"),
+    ((503, ""), "server error (503)"),
+    (asyncio.TimeoutError(), "timeout"),
+    (aiohttp.ClientConnectionError(), "connection failed"),
+    (aiohttp.ClientSSLError(MagicMock(), OSError()), "TLS failed"),
+    ((200, "<html>"), "unexpected response (200)"),
+    ((200, '{"country_code": "Germany"}'), "unexpected response (200)"),
+    ((404, '{"country": null}'), "unexpected response (404)"),
+])
+def test_an_answer_without_a_country_is_no_vote(answer, reason):
+    assert votes(FakeNode(**{"ipwho.is/": answer}))["ipv4"]["ipwho.is"] == reason
+
+
+def test_maxmind_without_a_token_or_over_its_limit_is_no_vote():
+    no_token = FakeNode(**{"www.maxmind.com/en/geoip-web-services-demo": "<html>no form</html>"})
+    assert votes(no_token)["ipv4"]["MaxMind"] == "unexpected response (200)"
+    assert no_token.urls("geoip.maxmind.com") == []
+    limited = FakeNode(**{"geoip.maxmind.com/geoip/v2.1/city/": (402, "")})
+    assert votes(limited)["ipv4"]["MaxMind"] == "daily limit (402)"
+    refused = FakeNode(**{"www.maxmind.com/en/geoip2/demo/token": (403, "")})
+    assert votes(refused)["ipv4"]["MaxMind"] == "forbidden (403)"
+
+
+def test_ip2location_without_its_token_is_no_vote():
+    node = FakeNode(**{"www.ip2location.com": "<html></html>"})
+    assert votes(node)["ipv4"]["ip2location.com"] == "unexpected response (200)"
+    assert node.urls("ip2location.io/query") == []
+
+
+def test_a_node_without_any_exit_address_fails():
+    result = probe(FakeNode(**{"ipv4.icanhazip.com": (502, "")}), families=())
+    assert (result["status"], result["reason"]) == ("failed", "No exit address answered through the proxy")
+    assert result["tested_families"] == []
+
+
+def test_a_probe_that_stalls_fails_in_time():
+    class Stalling(FakeNode):
+        async def request(self, method, url, headers=None, data=None):
+            await asyncio.sleep(10)
+
+    result = probe(Stalling(), timeout=0.05)
+    assert (result["status"], result["reason"]) == ("failed", "GeoIP providers did not answer in time")
+    assert result["tested_families"] == ["ipv4"]
+
+
+def test_providers_match_ipregions_geoip_group():
+    assert len(LOOKUPS) == 13 and len(set(PROVIDERS)) == 16
+    assert all(lookup.url.startswith("https://") and "{ip}" in lookup.url for lookup in LOOKUPS)
+
+
+# The requests themselves
+
+def test_requests_go_through_the_proxy_and_time_out(monkeypatch):
+    seen = []
+
+    async def proxy(request):
+        # A proxy gets the whole URL; this one answers by itself.
+        seen.append((request.method, str(request.url), request.headers.get("User-Agent")))
+        if request.path == "/slow":
+            await asyncio.sleep(1)
+        return web.Response(text="DE")
+
+    async def run():
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", proxy)
+        async with TestServer(app) as server:
+            async with aiohttp.ClientSession(headers={"User-Agent": location.USER_AGENT}) as session:
+                client = ProxyClient(session, f"http://127.0.0.1:{server.port}")
+                answer = await client.request("GET", "http://provider.invalid/lookup?ip=192.0.2.5")
+                monkeypatch.setattr(location, "REQUEST_TIMEOUT", 0.2)
+                with pytest.raises(asyncio.TimeoutError):
+                    await client.request("GET", "http://provider.invalid/slow")
+                return answer
+
+    assert asyncio.run(run()) == (200, "DE")
+    assert seen[0] == ("GET", "http://provider.invalid/lookup?ip=192.0.2.5", location.USER_AGENT)
+
+
+# The IP check
 
 class TestMainLocationIntegration(unittest.IsolatedAsyncioTestCase):
-    async def _run(self, location, trace=(None, None, float("inf"))):
+    async def _run(self, location_evidence_, trace=(None, None, float("inf"))):
         tester = NodeTester({"routing": {"enabled": True}}, real_ip="198.51.100.1")
         node = "vless://abc@192.0.2.1:443?encryption=foo#original"
         runner = MagicMock(proxy_url="http://127.0.0.1:23456", port=23456, ensure_alive=AsyncMock())
@@ -233,7 +318,7 @@ class TestMainLocationIntegration(unittest.IsolatedAsyncioTestCase):
                 patch("nodesieve.core.tester.aiohttp.ClientSession") as session_cls, \
                 patch("nodesieve.core.tester.aiohttp.TCPConnector") as connector_cls, \
                 patch.object(tester, "_fetch_ip", new=AsyncMock(return_value=trace)), \
-                patch.object(tester, "fetch_location", new=AsyncMock(return_value=location)) as location_probe, \
+                patch.object(tester, "fetch_location", new=AsyncMock(return_value=location_evidence_)) as location_probe, \
                 patch("nodesieve.core.tester.GeolocationService.get_country_name", new=AsyncMock(return_value="Germany")):
             runner_cls.return_value.__aenter__ = AsyncMock(return_value=runner)
             runner_cls.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -244,16 +329,16 @@ class TestMainLocationIntegration(unittest.IsolatedAsyncioTestCase):
         return result, tester.node_metadata[node], location_probe
 
     async def test_main_qualifies_when_cloudflare_trace_fails(self):
-        evidence = parse_ipregion(report())
-        result, metadata, probe = await self._run(evidence)
+        found = evidence()
+        result, metadata, probe_ = await self._run(found)
         self.assertIsNotNone(result)
         self.assertEqual(metadata["loc_score"], .75)
-        self.assertEqual(metadata["location"], evidence)
+        self.assertEqual(metadata["location"], found)
         self.assertEqual(metadata["country_code"], "DE")
-        probe.assert_awaited_once_with(23456, None, None)
+        probe_.assert_awaited_once_with(23456, None, None)
 
     async def test_survivor_is_renamed_with_consensus_and_keeps_shared_metadata(self):
-        result, metadata, _ = await self._run(parse_ipregion(report()), trace=("192.0.2.5", "US", 10))
+        result, metadata, _ = await self._run(evidence(), trace=("192.0.2.5", "US", 10))
         survivor, latency, tested = result
         self.assertEqual(latency, 10)
         self.assertEqual(tested, "vless://abc@192.0.2.1:443?encryption=none#original")
@@ -264,37 +349,48 @@ class TestMainLocationIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["latency_ms"], 10)
 
     async def test_restricted_or_weak_location_is_dropped_with_its_evidence(self):
-        for evidence, reason in (
-            (parse_ipregion(report(("RU",) * 3)), "Location country excluded: RU"),
-            (parse_ipregion(report(("DE", "DE"))), "Too few location reports"),
+        for found, reason in (
+            (evidence(("RU",) * 3), "Location country excluded: RU"),
+            (evidence(("DE", "DE")), "Too few location reports"),
         ):
             with self.subTest(reason=reason):
-                result, metadata, _ = await self._run(evidence, trace=("192.0.2.5", "DE", 10))
+                result, metadata, _ = await self._run(found, trace=("192.0.2.5", "DE", 10))
                 self.assertIsNone(result)
                 self.assertTrue(metadata["dropped"])
                 self.assertEqual(metadata["reason"], reason)
-                self.assertEqual(metadata["location"], evidence)
+                self.assertEqual(metadata["location"], found)
 
     async def test_tied_consensus_does_not_fall_back_to_single_provider_country_label(self):
-        result, metadata, _ = await self._run(parse_ipregion(report(("DE", "FI"))), trace=("192.0.2.5", "DE", 10))
+        result, metadata, _ = await self._run(evidence(("DE", "FI")), trace=("192.0.2.5", "DE", 10))
         self.assertIsNone(result)
         self.assertIsNone(metadata["country_code"])
         self.assertIn("tied", metadata["reason"])
 
     async def test_failed_probe_reports_why_location_is_unknown(self):
-        result, metadata, _ = await self._run(empty_location("failed", "ipregion timed out", ("ipv4",)))
+        failed = empty_location("failed", "GeoIP providers did not answer in time", ("ipv4",))
+        result, metadata, _ = await self._run(failed)
         self.assertIsNone(result)
-        self.assertEqual(metadata["reason"], "Location probe failed: ipregion timed out")
+        self.assertEqual(metadata["reason"], "Location probe failed: GeoIP providers did not answer in time")
 
-    async def test_leaked_ip_discovered_by_ipregion_drops_the_node(self):
-        evidence = parse_ipregion(report(ipv4="198.51.100.1"), real_ip="198.51.100.1")
-        result, metadata, _ = await self._run(evidence)
+    async def test_leaked_ip_found_by_the_probe_drops_the_node(self):
+        result, metadata, _ = await self._run(evidence(real_ip="192.0.2.5"))
         self.assertIsNone(result)
         self.assertEqual(metadata["reason"], "Proxy leaks real IP")
 
+    async def test_fetch_location_asks_through_the_nodes_listener(self):
+        tester = NodeTester({}, real_ip="198.51.100.1")
+        with patch("nodesieve.core.tester.probe_location", new=AsyncMock(return_value=evidence())) as probe_:
+            await tester.fetch_location(23456, "192.0.2.5", None)
+        probe_.assert_awaited_once_with("http://127.0.0.1:23456", families=["ipv4"], real_ip="198.51.100.1")
+
     async def test_legacy_score_api_uses_allowed_country_votes(self):
         tester = NodeTester({})
-        with patch.object(tester, "fetch_location", new=AsyncMock(return_value=parse_ipregion(report()))):
+        with patch.object(tester, "fetch_location", new=AsyncMock(return_value=evidence())):
             self.assertEqual(await tester.fetch_loc_score(23456, ["DE"]), .75)
             self.assertEqual(await tester.fetch_loc_score(23456, ["US"]), .25)
             self.assertEqual(await tester.fetch_loc_score(23456, []), 0)
+
+
+def test_no_subprocess_is_started_for_location():
+    source = open(location.__file__, encoding="utf-8").read()
+    assert not re.search(r"\bsubprocess\b|create_subprocess|os\.system|Popen", source)

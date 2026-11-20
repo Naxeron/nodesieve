@@ -16,7 +16,6 @@ import time
 from pathlib import Path
 
 import aiohttp
-import psutil
 import pytest
 import yaml
 
@@ -309,38 +308,9 @@ def test_a_link_without_a_mihomo_proxy_starts_nothing(fake_mihomo):
     async def inspect(batch):
         return [str(endpoint.exception) for endpoint in batch.endpoints]
 
-    nodes = [BatchNode("awg_conf:missing.conf#AWG"), BatchNode("warp://162.159.192.1:2408#WARP")]
-    assert serve(nodes, inspect) == [
-        "Could not parse AWG config: missing.conf",
-        "WARP nodes need a WARP registration: set warp_private_key in the settings.",
-    ]
+    nodes = [BatchNode("vless://no-server#broken"), BatchNode("vmess://eyJhZGQiOiIxOTIuMC4yLjUifQ==#other")]
+    assert serve(nodes, inspect) == ["The link does not convert to a Mihomo proxy"] * 2
     assert fake_mihomo == []
-
-
-def test_warp_and_amnezia_nodes_are_served_from_their_proxies(fake_mihomo, monkeypatch, tmp_path):
-    conf = tmp_path / "US.conf"
-    conf.write_text("[Interface]\nPrivateKey = cHJpdmF0ZQ==\nAddress = 10.8.0.2/32\nJc = 4\n"
-                    "[Peer]\nPublicKey = cHVibGlj\nEndpoint = 203.0.113.5:51820\n", encoding="utf-8")
-    written = {}
-    launch = mihomo.asyncio.create_subprocess_exec
-
-    async def keep_config(*command, **kwargs):
-        with open(command[command.index("-f") + 1], encoding="utf-8") as config:
-            written.update(yaml.safe_load(config))
-        return await launch(*command, **kwargs)
-
-    monkeypatch.setattr(mihomo.asyncio, "create_subprocess_exec", keep_config)
-    nodes = [BatchNode(f"awg_conf:{conf}#AWG_US"), BatchNode("warp://162.159.192.1:2408#WARP")]
-
-    async def inspect(batch):
-        return [endpoint.error for endpoint in batch.endpoints]
-
-    assert serve(nodes, inspect, {"warp_private_key": "a2V5"}) == [None, None]
-    awg, warp, ready = written["proxies"]
-    assert (awg["name"], awg["type"], awg["server"], awg["amnezia-wg-option"]) == (
-        "node-0", "wireguard", "203.0.113.5", {"jc": 4})
-    assert (warp["name"], warp["server"], warp["private-key"]) == ("node-1", "162.159.192.1", "a2V5")
-    assert ready["name"] == "nodesieve-ready"
 
 
 def test_a_mihomo_that_exits_while_serving_is_noticed(fake_mihomo):
@@ -532,7 +502,7 @@ async def _answer(reader, writer, hits):
 
 
 async def socks5_get(port, target_port):
-    """GET / from 127.0.0.1:target_port through a SOCKS5 proxy, as ipregion's curl asks a node."""
+    """GET / from 127.0.0.1:target_port through a SOCKS5 proxy, as a SOCKS client asks a node."""
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     try:
         writer.write(b"\x05\x01\x00")
@@ -613,7 +583,7 @@ def test_real_mihomo_serves_each_node_through_its_own_listener(tmp_path):
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.get(url, proxy=a.proxy_url) as response:
                         assert await response.text() == "hello"
-                    # Each listener also speaks SOCKS5, which ipregion uses.
+                    # Each listener also speaks SOCKS5, for SOCKS clients.
                     assert (await socks5_get(a.port, target.sockets[0].getsockname()[1])).endswith(b"hello")
                     # B's server is no Shadowsocks server: Mihomo answers 502 or drops the request.
                     try:
@@ -632,6 +602,9 @@ def test_real_mihomo_serves_each_node_through_its_own_listener(tmp_path):
 
 @needs_mihomo
 def test_real_scan_runs_only_a_few_mihomo_processes(tmp_path):
+    # Counts Mihomo processes; nodesieve itself does not need psutil.
+    psutil = pytest.importorskip("psutil")
+
     async def run():
         hits, peak = [], []
         target = await asyncio.start_server(lambda r, w: _answer(r, w, hits), "127.0.0.1", 0)

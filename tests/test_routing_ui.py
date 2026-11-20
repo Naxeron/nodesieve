@@ -103,14 +103,10 @@ class RoutingMenuTests(unittest.TestCase):
             result, _ = self.edit(result, ["5", "", "6"])
             self.assertEqual(result["routing_output_dir"], os.path.abspath("steer-output"))
 
-    def test_preferences_saved_by_earlier_versions_open_without_service_settings(self):
-        legacy = {"routing": {"enabled": True, "target": "forkozz", "main": {"mode": "location"},
-                              "services": {"twitter": {"mode": "country", "countries": ["US"]}}}}
-        result, text = self.edit(legacy, ["6"])
-        self.assertEqual(result["routing"], normalize_routing({"enabled": True}))
-        self.assertNotIn("Twitter", text)
-        with self.assertRaises(ValueError):
-            routing_menu({"routing": {"main": {"mode": "preserve"}}}, input_fn=lambda _: "0", output_fn=lambda _: None)
+    def test_settings_routing_does_not_know_are_refused(self):
+        for routing in ({"target": "forkozz"}, {"services": {}}, {"main": {"mode": "location"}}):
+            with self.subTest(routing=routing), self.assertRaises(ValueError):
+                routing_menu({"routing": routing}, input_fn=lambda _: "0", output_fn=lambda _: None)
 
 
 class RoutingCLITests(unittest.TestCase):
@@ -164,7 +160,7 @@ class RoutingCLITests(unittest.TestCase):
 
     def test_conflicting_actions_never_launch_pipeline_or_editor(self):
         for args in (
-            ["routing", "--run"], ["check", "--routing-show"],
+            ["routing", "--dry-run"], ["check", "--routing-show"],
             ["--routing-setup", "--dry-run"], ["config", "--routing-show"],
             ["routing", "--add-sub", "https://example.test"],
         ):
@@ -190,29 +186,16 @@ class RoutingCLITests(unittest.TestCase):
         with open(self.config_file, encoding="utf-8") as stream:
             self.assertTrue(json.load(stream)["routing"]["enabled"])
 
-    def test_service_preferences_from_earlier_versions_load_and_are_dropped_on_save(self):
-        legacy = {"enabled": True, "target": "forkozz", "main": {"mode": "location", "min_votes": 4},
-                  "services": {"twitter": {"mode": "country", "countries": ["US"]}, "discord": {"mode": "latency"}}}
-        with open(self.config_file, "w", encoding="utf-8") as stream:
-            json.dump({"routing": legacy, "router_test_port": 7891, "forkozz_config": ""}, stream)
-        code, text, _ = self.invoke(["--routing-show"])
-        self.assertEqual(code, 0)
-        self.assertIn("at least 4 valid reports", text)
-        code, _, _ = self.invoke(["--add-sub", "https://example.test/sub"])
-        self.assertEqual(code, 0)
-        with open(self.config_file, encoding="utf-8") as stream:
-            saved = json.load(stream)
-        self.assertEqual(saved["routing"], normalize_routing({"enabled": True, "main": {"min_votes": 4}}))
-        self.assertEqual(saved["subscriptions"], ["https://example.test/sub"])
-
-    def test_preserve_mode_from_earlier_versions_is_refused_instead_of_managing_main(self):
-        with open(self.config_file, "w", encoding="utf-8") as stream:
-            json.dump({"routing": {"enabled": False, "main": {"mode": "preserve"}}}, stream)
-        for args in (["--routing-show"], ["check", "--target", "steer"], ["check"]):
-            with self.subTest(args=args):
-                code, _, menu = self.invoke(args, tty=True)
-                self.assertEqual(code, 1)
-                menu.assert_not_called()
+    def test_unknown_routing_settings_are_refused_before_anything_runs(self):
+        for routing in ({"enabled": False, "main": {"mode": "preserve"}}, {"enabled": True, "services": {}},
+                        {"enabled": True, "target": "forkozz"}):
+            with open(self.config_file, "w", encoding="utf-8") as stream:
+                json.dump({"routing": routing}, stream)
+            for args in (["--routing-show"], ["check", "--target", "steer"], ["check"]):
+                with self.subTest(routing=routing, args=args):
+                    code, _, menu = self.invoke(args, tty=True)
+                    self.assertEqual(code, 1)
+                    menu.assert_not_called()
 
     def test_parser_accepts_steer_target_and_rejects_ambiguous_editor_flags(self):
         args = build_parser().parse_args(["check", "--target", "steer", "--output-dir", "out"])

@@ -6,17 +6,14 @@ multiplexing, and keeps it on the router only after answering a request through 
 """
 
 import asyncio
-import base64
 import copy
-import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
 
-import nodesieve.ui.dashboard as dashboard_module
-from nodesieve.core.router_validator import RouterValidator
+import nodesieve.feed as feed_module
 from nodesieve.core.tester import TRACE_URL_IPV4, TRACE_URL_IPV6, NodeTester
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict, without_mux
 from nodesieve.ui.dashboard import VPNDashboard
@@ -220,7 +217,7 @@ def test_no_multiplexing_probe_where_multiplexing_does_not_apply(servers, node, 
 def test_steer_node_is_checked_without_multiplexing_and_never_probed(servers):
     """Steer connects with its own core, so the checker neither needs nor decides multiplexing for it."""
     summary = {"country": "DE", "score": 1.0, "votes": 3, "total": 3, "counts": {"DE": 3}}
-    location = {**summary, "source": "ipregion", "status": "ok", "tested_families": ["ipv4"],
+    location = {**summary, "source": "geoip", "status": "ok", "tested_families": ["ipv4"],
                 "families": {"ipv4": copy.deepcopy(summary)}}
     node = ws_node("plain.example")
     with patch.object(NodeTester, "fetch_location", AsyncMock(return_value=location)), \
@@ -234,21 +231,11 @@ def test_steer_node_is_checked_without_multiplexing_and_never_probed(servers):
     assert tester.mux_offered == 0
 
 
-def test_router_validation_stages_each_node_the_way_it_was_verified():
-    validator = RouterValidator(router_client=MagicMock(), config={"use_mux": True})
-    staged, _ = validator.build_candidate_sub_yaml([
-        (ws_node("mux.example"), 10.0, "original"),
-        (without_mux(ws_node("plain.example")), 12.0, "original"),
-    ])
-    proxies = yaml.safe_load(staged)["proxies"]
-    assert {proxy["server"]: "smux" in proxy for proxy in proxies} == {"mux.example": True, "plain.example": False}
-
-
-def test_scan_reports_multiplexing_and_deploys_it_only_where_it_works(servers, caplog):
+def test_scan_reports_multiplexing_and_publishes_it_only_where_it_works(servers, caplog):
     servers.with_mux.add("mux.example")
     nodes = [ws_node("mux.example"), ws_node("plain.example"), VISION]
     dashboard = VPNDashboard({
-        "subscriptions": [], "use_mux": True, "workers": 2, "tcp_workers": 2, "enable_router_validation": False,
+        "subscriptions": [], "use_mux": True, "workers": 2, "tcp_workers": 2,
     })
 
     async def speedtest(candidates, tester=None):
@@ -261,7 +248,7 @@ def test_scan_reports_multiplexing_and_deploys_it_only_where_it_works(servers, c
             patch("nodesieve.ui.dashboard.NodeFetcher.fetch_all", AsyncMock(return_value=(nodes, {}))), \
             patch("nodesieve.ui.dashboard.MihomoManager.setup"), \
             caplog.at_level("INFO", logger="nodesieve"):
-        assert asyncio.run(dashboard.run_pipeline_async(check_only=True))
+        assert asyncio.run(dashboard.run_pipeline_async())
 
     assert "Multiplexing: 1 of 2 eligible working nodes support it; the rest are used without it." in caplog.text
     # Each node is served, with its multiplexed twin for the probe, by a Mihomo shared by up
@@ -272,9 +259,9 @@ def test_scan_reports_multiplexing_and_deploys_it_only_where_it_works(servers, c
         (VISION, None),
     ])
     assert max(len(batch) for batch in servers.batches) == 2
-    script = (Path(dashboard_module.PROJECT_ROOT) / "apply_to_router.sh").read_text(encoding="utf-8")
-    provider = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d > /etc/mihomo/proxy-providers/sub\.yaml\.tmp", script)
-    proxies = yaml.safe_load(base64.b64decode(provider.group(1)))["proxies"]
+    # The feed's Clash profile keeps multiplexing only where the node answered through it.
+    profile = (Path(feed_module.PROJECT_ROOT) / "feed" / "clash.yaml").read_text(encoding="utf-8")
+    proxies = yaml.safe_load(profile)["proxies"]
     assert {proxy["server"]: "smux" in proxy for proxy in proxies} == {
         "mux.example": True, "plain.example": False, "vision.example": False,
     }
