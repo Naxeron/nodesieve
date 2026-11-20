@@ -11,11 +11,12 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from proxy_sites.config import ConfigManager
-from proxy_sites.constants import CONFIG_FILE, PROJECT_ROOT
+from proxy_sites.constants import CONFIG_FILE
 from proxy_sites.core.fetcher import NodeFetcher
 from proxy_sites.core.router_validator import RouterValidator
 from proxy_sites.router.script_generator import generate_router_script
 from proxy_sites.ui.cli import build_parser, main
+import proxy_sites.ui.dashboard as dashboard_module
 from proxy_sites.ui.dashboard import VPNDashboard
 
 
@@ -308,7 +309,10 @@ class TestStreamlinedCLI(unittest.TestCase):
 
 
 class TestFreshOnDemandFetcher(unittest.TestCase):
-    """Tests fresh on-demand fetching and elimination of Goida bulk aggregators & disk caches."""
+    """Tests on-demand fetching and elimination of Goida bulk aggregators.
+
+    The fallback cache of subscription payloads is covered by test_sub_cache.py.
+    """
 
     def test_fetch_all_excludes_goida_bulk_mirrors(self):
         """Fetcher only queries user-configured subscriptions and does not append Goida mirrors."""
@@ -332,39 +336,6 @@ class TestFreshOnDemandFetcher(unittest.TestCase):
         self.assertEqual(queried_urls, ["https://example.com/custom_sub.txt"])
         self.assertNotIn("goida", str(queried_urls).lower())
         self.assertEqual(len(nodes), 1)
-
-    def test_fetcher_does_not_accumulate_disk_cache(self):
-        """_process_url performs live HTTP request and does not write to sub_cache directory."""
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            test_url = "https://example.com/sub.txt"
-            fetcher = NodeFetcher(config={"subscriptions": [test_url]})
-
-            # Simulate successful HTTP response
-            mock_session = MagicMock()
-            mock_resp = MagicMock()
-            mock_resp.status = 200
-            node_line = b"vless://uuid@1.2.3.4:443?type=tcp#NodeA\n"
-
-            async def async_read():
-                return node_line
-
-            mock_resp.read = async_read
-
-            class AsyncContextManager:
-                async def __aenter__(self):
-                    return mock_resp
-
-                async def __aexit__(self, exc_type, exc_val, exc_tb):
-                    pass
-
-            mock_session.get.return_value = AsyncContextManager()
-
-            nodes = asyncio.run(fetcher._process_url(mock_session, test_url))
-            self.assertEqual(len(nodes), 1)
-
-            # Check that sub_cache directory was not created or populated in tmp_dir
-            sub_cache_path = os.path.join(tmp_dir, "sub_cache")
-            self.assertFalse(os.path.exists(sub_cache_path))
 
     def test_fetcher_with_empty_remote_subscriptions_loads_local_awg(self):
         """When subscriptions list is empty, fetcher still discovers local AmneziaWG .conf files."""
@@ -445,13 +416,10 @@ class TestStockpileElimination(unittest.TestCase):
 
     def test_pipeline_does_not_create_or_merge_stockpile(self):
         """Running VPNDashboard does not create or read gemini_subscription.txt."""
-        stockpile_path = os.path.join(PROJECT_ROOT, "gemini_subscription.txt")
-        tmp_stockpile = os.path.join(PROJECT_ROOT, "gemini_subscription_tmp.txt")
-
-        # Ensure neither exists before test
-        for p in [stockpile_path, tmp_stockpile]:
-            if os.path.exists(p):
-                os.remove(p)
+        # The project directory the pipeline writes to: an empty temporary one (tests/conftest.py).
+        project_dir = dashboard_module.PROJECT_ROOT
+        stockpile_path = os.path.join(project_dir, "gemini_subscription.txt")
+        tmp_stockpile = os.path.join(project_dir, "gemini_subscription_tmp.txt")
 
         dash = VPNDashboard(config={
             "subscriptions": ["https://example.com/mock_sub"],
@@ -474,7 +442,8 @@ class TestStockpileElimination(unittest.TestCase):
         success = asyncio.run(dash.run_pipeline_async(check_only=True))
         self.assertTrue(success)
 
-        # Neither stockpile file must be created on disk!
+        # The pipeline wrote its router script, and neither stockpile file, to the project directory.
+        self.assertTrue(os.path.exists(os.path.join(project_dir, "apply_to_router.sh")))
         self.assertFalse(os.path.exists(stockpile_path), "gemini_subscription.txt must not be created!")
         self.assertFalse(os.path.exists(tmp_stockpile), "gemini_subscription_tmp.txt must not be created!")
 
