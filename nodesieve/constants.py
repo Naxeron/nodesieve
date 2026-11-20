@@ -63,26 +63,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "feed_update_hours": 6,
 }
 
-# Test Mihomo YAML template (used during individual node testing)
-CONFIG_YAML_TEMPLATE = """mixed-port: {PORT}
-allow-lan: false
-mode: rule
-log-level: warning
-ipv6: true
-proxy-providers:
-  test_sub:
-    type: file
-    path: {NODE_FILE}
-    health-check:
-      enable: false
-proxy-groups:
-  - name: "TESTGROUP"
-    type: select
-    use:
-      - test_sub
-rules:
-  - MATCH,TESTGROUP
-"""
+# The local Mihomo instances that check nodes get their configuration from
+# nodesieve.core.mihomo.render_batch_config.
 
 # Router connection constants
 # Connectivity probe for router-side delay checks and Mihomo health checks.

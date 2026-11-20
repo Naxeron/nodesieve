@@ -33,6 +33,9 @@ tests/
 │   ├── test_tester.py                  # NodeTester TCP ping, IP resolution, Phase 1 IP check, speedtest
 │   ├── test_location.py                # ipregion GeoIP consensus and its subprocess handling
 │   ├── test_main_routing.py            # Main-pool location policy and candidate selection
+│   ├── test_mihomo_batch.py            # One Mihomo per batch of nodes: refused and crashing nodes set
+│   │                                   # aside, lost instances, scan limits; against a stand-in
+│   │                                   # for Mihomo and the real binary
 │   ├── test_multiplexing.py            # use_mux: a node is checked without multiplexing and keeps it,
 │   │                                   # up to the router config, only if its server answers through it
 │   ├── test_routing_ui.py              # Routing menu and routing CLI flags
