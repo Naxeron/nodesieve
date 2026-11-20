@@ -43,6 +43,11 @@ website is probed — through a dual-stage, router-representative pipeline:
        └── Verify service health post-restart
 ```
 
+Both targets also write the nodes they would deploy, in the same order, to the
+subscription feed (`feed/`: share links, the same in base64, and a Clash/Mihomo
+profile). A scan without results leaves it as it was. `python -m nodesieve serve`
+hands it to VPN apps over HTTP.
+
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
@@ -113,6 +118,12 @@ identifiers before deploying a new configuration.
 - `select_main_pool(candidates, metadata, routing) -> {"policy", "eligible", "excluded"}`: Every qualifying node, ranked.
 - `write_steer_artifacts(route, config) -> dict`: Writes the redacted report and, when the pool is not empty, the ranked server list and apply script.
 - Router contract of the apply script (Zapret Manager panel backend, `/opt/zapret-manager-luci/backend.sh`): `steer_action sub_status` (JSON with `exit`, `kind`, `url`, `vpn.up`), `steer_action sub_links_get`, `steer_action sub_set @stdin` (starts job `steer`), `job_status steer`, `log_tail steer`. The script prints `PSC_OK:` only after the panel shows the new list; `PSC_ERROR:`, `PSC_LOG:` and `PSC_NOTE:` lines carry failures, panel log excerpts and warnings back to `dashboard.py`.
+- `write_steer_artifacts` also returns `servers`, the ranked list, which the Steer pipeline publishes to the feed.
+
+### `feed.py` ↔ `dashboard.py` / `cli.py`
+- `write_feed(nodes, config) -> {"written", "count", "left_out", "directory"}`: Replaces `links.txt`, `links-base64.txt` and `clash.yaml` in the feed directory, each atomically and with mode 0600, with the nodes that have a share link (VLESS, Trojan, Shadowsocks), in order and without repeated servers. With none, nothing is written and the previous feed stays. The profile enables multiplexing only for Mihomo-target scans, as `node_url_to_mihomo_dict` reads each link's `smux` marker; `links.txt` drops the marker.
+- `feed_status(config) -> {"count", "written_at"} | None`: The feed apps get now.
+- `build_app(config, token)` / `serve_feed(config, token, host, port)`: `GET`/`HEAD /<token>/<file>` for the three files with `profile-update-interval` and `profile-title` headers, 503 before the first feed, 404 for anything else. `cli.py` creates `feed_token` on the first `serve` and saves only that, refusing to save over a settings file it cannot read (`ConfigManager.load(strict=True)`).
 
 ## Code Layout
 ```
@@ -120,6 +131,8 @@ nodesieve/
 ├── __main__.py                      # Entry point: python -m nodesieve
 ├── config.py                        # Settings file (nodesieve_config.json, carried over from proxy_sites_config.json)
 ├── constants.py                     # ROUTER_CONFIG_TEMPLATE, router connection constants
+├── feed.py                          # Subscription feed (links, base64, Clash profile) and its HTTP server
+├── files.py                         # Atomic owner-only writes of files holding credentials
 ├── routing.py                       # Main-pool location policy and candidate selection
 ├── location.py                      # ipregion GeoIP consensus through a node's proxy
 ├── geo.py                           # Country name and IP country lookups
@@ -134,7 +147,7 @@ nodesieve/
 │   ├── pusher.py                    # push_to_router (SSH stdin streaming)
 │   └── script_generator.py          # generate_router_script (apply_to_router.sh)
 └── ui/
-    ├── cli.py                       # Command-line options and actions
+    ├── cli.py                       # Command-line options and actions, including serve
     ├── dashboard.py                 # Pipeline UI and workflow coordinator
     └── routing.py                   # Steer routing menu
 ssh_router.py                        # Standalone SSH CLI helper (Paramiko-based)

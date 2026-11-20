@@ -53,6 +53,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "router_ssh_port": 22,
     "router_ssh_user": "root",
     "router_ssh_pass": "",
+    # Subscription feed (nodesieve/feed.py): its directory, empty for feed/ in the project
+    # directory, and the server `serve` runs. feed_token, the secret part of the feed's
+    # address, is created by the first `serve`.
+    "feed_dir": "",
+    "feed_host": "127.0.0.1",
+    "feed_port": 9876,
+    "feed_token": "",
+    "feed_update_hours": 6,
 }
 
 # Test Mihomo YAML template (used during individual node testing)

@@ -36,8 +36,13 @@ class ConfigManager:
         return path
 
     @classmethod
-    def load(cls, path: str = CONFIG_FILE) -> Dict[str, Any]:
-        """Loads configuration from disk, applying defaults and normalizing legacy formats."""
+    def load(cls, path: str = CONFIG_FILE, strict: bool = False) -> Dict[str, Any]:
+        """Loads configuration from disk, applying defaults and normalizing legacy formats.
+
+        A file that can't be read is replaced by the defaults, with a warning. With
+        strict, it raises ValueError instead: before saving, so that the defaults
+        don't overwrite the file.
+        """
         config = copy.deepcopy(DEFAULT_CONFIG)
         if os.path.exists(path):
             try:
@@ -48,7 +53,11 @@ class ConfigManager:
                 loaded = json.loads(sanitized)
                 if isinstance(loaded, dict):
                     config.update(loaded)
+                elif strict:
+                    raise ValueError("it does not hold a JSON object")
             except Exception as e:
+                if strict:
+                    raise ValueError(f"cannot read '{path}': {e}") from e
                 log.warning(
                     f"[!] Warning: Failed to parse configuration file '{path}': {e}. "
                     "Using default values."
@@ -97,17 +106,30 @@ class ConfigManager:
         except (ValueError, TypeError):
             config["mem_per_worker"] = 8.0
 
-        # Ensure router ports are valid integers in port range
+        # Ensure router and feed ports are valid integers in port range
         for port_field, default_port in [
             ("router_api_port", 9090),
             ("router_proxy_port", 7890),
             ("router_ssh_port", 22),
+            ("feed_port", DEFAULT_CONFIG["feed_port"]),
         ]:
             try:
                 val = int(config.get(port_field, default_port))
                 config[port_field] = val if 1 <= val <= 65535 else default_port
             except (ValueError, TypeError):
                 config[port_field] = default_port
+
+        # Subscription feed
+        for text_field in ("feed_dir", "feed_token"):
+            value = config.get(text_field)
+            config[text_field] = value.strip() if isinstance(value, str) else ""
+        host = config.get("feed_host")
+        config["feed_host"] = host.strip() if isinstance(host, str) and host.strip() else DEFAULT_CONFIG["feed_host"]
+        try:
+            hours = int(config.get("feed_update_hours", DEFAULT_CONFIG["feed_update_hours"]))
+            config["feed_update_hours"] = hours if hours >= 1 else DEFAULT_CONFIG["feed_update_hours"]
+        except (ValueError, TypeError):
+            config["feed_update_hours"] = DEFAULT_CONFIG["feed_update_hours"]
 
     @classmethod
     def save(cls, config: Dict[str, Any], path: str = CONFIG_FILE) -> None:

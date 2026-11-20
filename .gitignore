@@ -9,6 +9,7 @@
 /forkozz-output/
 /crashed_nodes.txt
 /sub_cache/
+/feed/
 
 # AmneziaWG profiles (private keys), read from the project directory
 /*.conf

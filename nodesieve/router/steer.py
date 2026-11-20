@@ -14,12 +14,11 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import re
-import tempfile
 from urllib.parse import quote, unquote
 
+from nodesieve.files import write_private
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
 from nodesieve.routing import main_location_rank, main_policy_failure, normalize_routing
 
@@ -45,19 +44,6 @@ def routing_fingerprint(config: dict) -> str:
     material = {"routing": routing, "router_host": config.get("router_host", ""),
                 "main_pool_selection": "all_qualified_v1"}
     return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-
-
-def _write_private(path: Path, text: str, mode: int = 0o600) -> None:
-    fd, temporary = tempfile.mkstemp(prefix=".psc-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as output:
-            output.write(text)
-            output.flush()
-            os.fchmod(output.fileno(), mode)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 def _node_id(node: str) -> str:
@@ -279,12 +265,13 @@ export of an apply script; previous scripts are removed before attempting export
             report["errors"].append("main: no supported proxy satisfies the location policy")
     if not report["errors"]:
         script = _script(servers)
-        _write_private(servers_path, "\n".join(servers) + "\n")
-        _write_private(script_path, script, 0o700)
+        write_private(servers_path, "\n".join(servers) + "\n")
+        write_private(script_path, script, 0o700)
         report["script_sha256"] = hashlib.sha256(script.encode()).hexdigest()
         report["ready"] = True
-    _write_private(report_path, json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    write_private(report_path, json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     return {"ready": report["ready"], "report_path": str(report_path),
             "script_path": str(script_path) if report["ready"] else None,
             "servers_path": str(servers_path) if report["ready"] else None,
+            "servers": servers if report["ready"] else [],
             "warnings": report["warnings"], "errors": report["errors"]}

@@ -2,7 +2,9 @@
 
 nodesieve checks VPN proxy nodes by their exit IP — reachability, exit address,
 country and location agreement — measures performance, and deploys suitable nodes
-to an OpenWrt router using Mihomo.
+to an OpenWrt router using Mihomo. It also publishes them as a
+[subscription feed](#subscription-feed) that VPN apps, on a phone or anywhere else,
+can subscribe to.
 
 Also supports **Steer** from [Zapret Manager](https://github.com/StressOzz/Zapret-Manager):
 nodesieve ranks nodes by location agreement and supplies the servers of Steer's
@@ -49,8 +51,9 @@ which needs a few extra steps: see [Termux (Android)](#termux-android).
   `warp_private_key` and, for IPv6 inside the tunnel, its IPv6 address in
   `warp_ipv6`. Without a key the WARP endpoints are skipped.
 
-The files a scan writes (`apply_to_router.sh`, `steer-output/`, `crashed_nodes.txt`,
-`sub_cache/`) contain proxy credentials and are ignored by git as well.
+The files a scan writes (`apply_to_router.sh`, `steer-output/`, `feed/`,
+`crashed_nodes.txt`, `sub_cache/`) contain proxy credentials and are ignored by git as
+well.
 
 ### Termux (Android)
 
@@ -83,6 +86,14 @@ pip install -r requirements.txt
   every other app.
 - **Router validation and deployment** work as on a computer when the phone can reach
   the router, for example over the router's Wi-Fi.
+- **Scan with your VPN app off, or with Termux excluded from it** (the app's per-app
+  proxy or split tunnelling setting). While a VPN app is connected, Termux's connections
+  go through it too, so every node would be checked through your current VPN instead of
+  the phone's own network.
+- **To use the results in a VPN app on the phone**, run `python -m nodesieve serve` in a
+  second Termux session and subscribe the app to an address it prints; see
+  [Subscription feed](#subscription-feed). Termux has to keep running in the background
+  for the app's updates to reach it.
 
 ## What is checked
 
@@ -138,8 +149,55 @@ skip that request. Steer connects with its own core, so a Steer scan never asks.
 After the IP check, surviving nodes are staged on the router and kept only if they
 answer a connectivity probe through the router's own WAN (`--no-router-validation`
 skips this). The top nodes by measured download speed are written to
-`apply_to_router.sh` and, with `run`, deployed over SSH with a syntax pre-flight and
-automatic rollback.
+`apply_to_router.sh` and the [subscription feed](#subscription-feed) and, with `run`,
+deployed over SSH with a syntax pre-flight and automatic rollback.
+
+## Subscription feed
+
+Every scan that finds nodes also writes them to `feed/` in the project directory, as a
+subscription that VPN apps can follow. Apps on a phone can't be configured by another
+program, but all of them can subscribe to an address, so this is how nodesieve works
+with any of them:
+
+| File | Contents | Read by |
+|---|---|---|
+| `links.txt` | One share link per line | v2rayNG, Hiddify, NekoBox, Happ, v2RayTun, Steer |
+| `links-base64.txt` | The same list, base64-encoded | Apps that read only that |
+| `clash.yaml` | A complete Clash/Mihomo profile | Clash Meta for Android, FlClash and other Clash apps |
+
+The feed holds the nodes a scan would deploy, in the same order: the top nodes by
+speed for the Mihomo target, the ranked main pool for Steer. The profile's `Auto` group
+uses the first node in that order that answers, and the `nodesieve` group in front of
+it lets you pick a node by hand. Multiplexing is on only for nodes whose server answered
+through it in the scan. WARP and AmneziaWG nodes stay out: they use this computer's
+keys and have no share link.
+
+A scan that finds nothing leaves the feed as it was, so subscribed apps keep the nodes
+of the last scan that found some. The scan says how old they are.
+
+To hand the feed to apps, keep this running:
+
+```sh
+python -m nodesieve serve
+```
+
+The first run creates `feed_token`, a random part of the feed's address, saves it to
+`nodesieve_config.json`, and prints the three addresses to subscribe to, such as
+`http://127.0.0.1:9876/<token>/links.txt`. Files are read on every request, so `serve`
+hands out each new scan's results without a restart. Apps that read the server's
+update interval refresh every 6 hours (`feed_update_hours`); others have an update
+setting of their own.
+
+- **Who can reach it.** `serve` listens on `127.0.0.1`, so only apps on the same device
+  can. `--feed-host 0.0.0.0` (or `feed_host`) makes it reachable from the local
+  network, for example to subscribe a phone to a computer's feed; anyone on that
+  network who learns the address can then read the nodes. `--feed-port` (or
+  `feed_port`) changes the port.
+- **Credentials.** The feed holds proxy credentials. Its files are readable only by
+  you, and git ignores `feed/`. To change the address, clear `feed_token` and restart
+  `serve`; subscribed apps then need the new one.
+- **Elsewhere.** `feed_dir` writes the feed to another directory; a relative path is
+  taken from the project directory.
 
 ## Steer main pool
 

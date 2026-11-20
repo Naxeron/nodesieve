@@ -19,6 +19,7 @@ from nodesieve.core.fetcher import NodeFetcher
 from nodesieve.core.limits import ResourceLimits
 from nodesieve.core.mihomo import MihomoManager
 from nodesieve.core.tester import NodeTester
+from nodesieve.feed import feed_status, write_feed
 from nodesieve.logging import ErrorTracker, log, update_progress
 from nodesieve.router.client import RouterClient
 from nodesieve.router.pusher import push_to_router
@@ -298,6 +299,7 @@ class VPNDashboard:
         candidates, tester = await self.fetch_and_verify_candidates_async()
         if not candidates:
             log.warning("[-] Pipeline aborted: No surviving verified nodes.")
+            self.report_kept_feed()
             return False
 
         # 3. Phase 2 Speedtesting & Ranking
@@ -318,15 +320,16 @@ class VPNDashboard:
         # 4. Generate router deployment script & configurations
         generate_router_script(final_nodes, self.config)
         log.info(f"[*] Generated OpenWrt deployment script '{ROUTER_SCRIPT_FILE}' with {len(final_nodes)} top verified nodes.")
+        feed_ok = self.publish_feed(final_nodes)
 
         # 5. Check-only or dry-run completion
         if check_only:
             log.info(f"[+] Check-only complete: {len(final_nodes)} top verified nodes formatted for deployment.")
-            return True
+            return feed_ok
 
         if dry_run:
             log.info(f"[+] [DRY RUN] Staged and verified {len(final_nodes)} nodes. Skipping remote router deployment.")
-            return True
+            return feed_ok
 
         # 6. Automated Deployment & Rollback Safety
         log.info("[*] Automatically deploying verified configuration to router via SSH...")
@@ -335,7 +338,7 @@ class VPNDashboard:
             log.info("[+] Deployment to router completed successfully.")
         else:
             log.error("[-] Deployment to router failed. Router was automatically rolled back to working state.")
-        return deploy_ok
+        return deploy_ok and feed_ok
 
     async def run_routing_pipeline_async(self, check_only=False, deploy_only=False, dry_run=False) -> bool:
         """Export the location-ranked main server list for Steer without touching the Mihomo verifier."""
@@ -370,11 +373,36 @@ class VPNDashboard:
         log.info(f"[*] Routing report: {artifacts['report_path']}")
         if not artifacts["ready"]:
             log.error("[-] Steer export unresolved: no proxy qualifies for the main pool. See the report; change preferences or check new proxies.")
+            self.report_kept_feed()
             return False
         log.info(f"[+] Steer server list generated: {artifacts['servers_path']}")
+        feed_ok = self.publish_feed(artifacts["servers"])
         if check_only or dry_run:
-            return True
-        return self.deploy_steer()
+            return feed_ok
+        return self.deploy_steer() and feed_ok
+
+    def publish_feed(self, nodes: List[str]) -> bool:
+        """Write the scan's nodes to the subscription feed; False only when it could not be written."""
+        try:
+            result = write_feed(nodes, self.config)
+        except (OSError, ValueError, TypeError) as exc:
+            log.error(f"[-] Cannot write the subscription feed: {exc}")
+            return False
+        if result["left_out"]:
+            log.info(f"[*] Left out of the subscription feed: {result['left_out']} WARP, AmneziaWG or "
+                     "other nodes without a share link.")
+        if result["written"]:
+            log.info(f"[+] Subscription feed updated with {result['count']} nodes: {result['directory']}")
+        else:
+            self.report_kept_feed()
+        return True
+
+    def report_kept_feed(self) -> None:
+        """Say what subscribed apps get when a scan leaves the feed as it was."""
+        status = feed_status(self.config)
+        if status:
+            log.warning(f"[!] The subscription feed is unchanged: it keeps the {status['count']} nodes "
+                        f"of the scan from {status['written_at']:%Y-%m-%d %H:%M}.")
 
     def deploy_steer(self, dry_run=False) -> bool:
         """Deploy a fresh reviewed artifact through Zapret Manager's own Steer backend."""

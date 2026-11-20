@@ -21,6 +21,7 @@ _PROJECT_ROOT_USERS = (
     "nodesieve.core.fetcher",
     "nodesieve.core.mihomo",
     "nodesieve.core.router_validator",
+    "nodesieve.feed",
     "nodesieve.parsers.base",
     "nodesieve.router.pusher",
     "nodesieve.router.script_generator",

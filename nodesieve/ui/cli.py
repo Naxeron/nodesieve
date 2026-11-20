@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import errno
 import json
 import os
 import shlex
@@ -10,6 +11,7 @@ from typing import List, Optional
 
 from nodesieve.config import ConfigManager
 from nodesieve.constants import CRASHED_LOG_FILE, PROJECT_ROOT
+from nodesieve.feed import new_token, serve_feed, valid_token
 from nodesieve.logging import log
 from nodesieve.routing import normalize_routing
 from nodesieve.ui.dashboard import VPNDashboard
@@ -45,13 +47,14 @@ def build_parser() -> argparse.ArgumentParser:
         "action",
         nargs="?",
         default=None,
-        choices=["run", "check", "deploy", "config", "routing"],
+        choices=["run", "check", "deploy", "config", "routing", "serve"],
         action=_ActionCapture,
         help="Pipeline phase to execute: 'run' (default: full test, verify & deploy), "
              "'check' (test & verify without deploying), "
              "'deploy' (deploy existing configuration to router), "
              "'config' (manage configuration), "
-             "'routing' (edit Steer main-pool routing in a terminal, or display it when piped).",
+             "'routing' (edit Steer main-pool routing in a terminal, or display it when piped), "
+             "'serve' (serve the subscription feed that scans write, for VPN apps to subscribe to).",
     )
 
     # Phase flags
@@ -181,6 +184,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Router SSH password.",
     )
 
+    # Subscription feed server
+    parser.add_argument(
+        "--feed-host",
+        dest="feed_host",
+        help="Address 'serve' listens on (default: 127.0.0.1, this device only; 0.0.0.0 for the local network).",
+    )
+    parser.add_argument(
+        "--feed-port",
+        dest="feed_port",
+        type=int,
+        help="Port 'serve' listens on (default: 9876).",
+    )
+
     # Non-interactive config management flags
     parser.add_argument(
         "--show-config",
@@ -223,18 +239,62 @@ def settings_menu(config: dict) -> None:
     print(f"Router Host: {config.get('router_host', '192.168.1.1')}")
 
 
+def serve(config: dict, cfg_path: str, args: argparse.Namespace) -> None:
+    """Serve the subscription feed until Ctrl+C, then exit.
+
+    The first run creates the feed's token and saves only that to the settings file, so
+    no override given for this run is saved with it.
+    """
+    host = (args.feed_host if args.feed_host is not None else config["feed_host"]).strip()
+    port = args.feed_port if args.feed_port is not None else config["feed_port"]
+    if not host:
+        log.error("[-] --feed-host cannot be empty.")
+        sys.exit(1)
+    if not 1 <= port <= 65535:
+        log.error(f"[-] Invalid port {port} for --feed-port. Port must be between 1 and 65535.")
+        sys.exit(1)
+    token = config["feed_token"]
+    if not token:
+        token = new_token()
+        try:
+            saved = ConfigManager.load(cfg_path, strict=True)
+            saved["feed_token"] = token
+            ConfigManager.save(saved, cfg_path)
+        except (OSError, ValueError) as exc:
+            log.error(f"[-] Could not save the feed's token to {cfg_path}: {exc}")
+            sys.exit(1)
+        config["feed_token"] = token
+        log.info(f"[*] Created the feed's token, the secret part of its address, and saved it to {cfg_path}.")
+    elif not valid_token(token):
+        log.error("[-] feed_token must be 16 to 128 letters, digits, '-' or '_'. Clear it to have a new one created.")
+        sys.exit(1)
+    try:
+        asyncio.run(serve_feed(config, token, host, port))
+    except KeyboardInterrupt:
+        pass
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            log.error(f"[-] Cannot serve the feed: port {port} is in use. Is serve already running? "
+                      "Choose another port with --feed-port.")
+        else:
+            log.error(f"[-] Cannot serve the feed on {host}:{port}: {exc}")
+        sys.exit(1)
+    sys.exit(0)
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     """Primary CLI application entry point with streamlined single-command execution."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # Initialize crashed nodes log
-    crashed_log_path = os.path.join(PROJECT_ROOT, CRASHED_LOG_FILE)
-    try:
-        with open(crashed_log_path, "w", encoding="utf-8") as f:
-            f.write("--- CRASHED NODES LOG ---\n\n")
-    except Exception:
-        pass
+    # Initialize crashed nodes log. The feed server runs beside scans and keeps the last scan's log.
+    if args.action != "serve":
+        crashed_log_path = os.path.join(PROJECT_ROOT, CRASHED_LOG_FILE)
+        try:
+            with open(crashed_log_path, "w", encoding="utf-8") as f:
+                f.write("--- CRASHED NODES LOG ---\n\n")
+        except Exception:
+            pass
 
     # Load configuration
     cfg_path = args.config_file or ConfigManager.default_path(PROJECT_ROOT)
@@ -274,6 +334,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         args.action == "config" or args.show_config or args.add_sub is not None or args.remove_sub is not None
     ):
         log.error("[-] Conflicting options: Choose routing setup/display or other configuration management.")
+        sys.exit(1)
+    if args.action == "serve" and (
+        pipeline_flags_present or routing_management or args.show_config
+        or args.add_sub is not None or args.remove_sub is not None
+    ):
+        log.error("[-] Conflicting options: 'serve' runs on its own, without pipeline, routing or configuration options.")
         sys.exit(1)
 
     # Routing overrides also apply to display and setup, before their early exits.
@@ -358,6 +424,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.show_config or args.action == "config":
         print(json.dumps(config, indent=4, ensure_ascii=False))
         sys.exit(0)
+
+    if args.action == "serve":
+        serve(config, cfg_path, args)
 
     # Apply runtime CLI overrides to active config with strict validation
     if args.subscriptions:
