@@ -5,7 +5,7 @@
 website is probed — through a dual-stage, router-representative pipeline:
 
 ```
-[Raw Subscriptions]
+[Raw Subscriptions] (a failed or empty download falls back to that subscription's last good copy in sub_cache/)
        │
        ▼
 [Phase 0: TCP Reachability Filter] (Local rapid pre-filter: raw TCP connect, timeout 1.5s)

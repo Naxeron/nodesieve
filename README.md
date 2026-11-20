@@ -30,6 +30,12 @@ Developed and tested on Linux with Python 3.14.
   git ignores it because it holds subscription links and router credentials.
   `--show-config` prints the active settings and `--remove-sub` removes a
   subscription.
+- **Subscription cache.** Every subscription that downloads with usable nodes is
+  saved in `sub_cache/` in the project directory. When a subscription later can't be
+  downloaded (timeout, connection error, an HTTP error) or returns no usable nodes,
+  the scan warns and tests the nodes from its last good download instead, and the
+  saved copy is kept until a download succeeds again. Dead nodes in an old copy are
+  dropped by the checks like any others. Delete `sub_cache/` to clear the cache.
 - **Router access.** Router validation and deployment reach the router at
   `router_host` (default `192.168.1.1`) and log in over SSH as `router_ssh_user`
   (default `root`). While `router_ssh_pass` is empty, which is the default, the SSH
@@ -41,8 +47,8 @@ Developed and tested on Linux with Python 3.14.
   `warp_private_key` and, for IPv6 inside the tunnel, its IPv6 address in
   `warp_ipv6`. Without a key the WARP endpoints are skipped.
 
-The files a scan writes (`apply_to_router.sh`, `steer-output/`, `crashed_nodes.txt`)
-contain proxy credentials and are ignored by git as well.
+The files a scan writes (`apply_to_router.sh`, `steer-output/`, `crashed_nodes.txt`,
+`sub_cache/`) contain proxy credentials and are ignored by git as well.
 
 ## What is checked
 

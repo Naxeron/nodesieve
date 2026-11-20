@@ -308,7 +308,10 @@ class TestStreamlinedCLI(unittest.TestCase):
 
 
 class TestFreshOnDemandFetcher(unittest.TestCase):
-    """Tests fresh on-demand fetching and elimination of Goida bulk aggregators & disk caches."""
+    """Tests on-demand fetching and elimination of Goida bulk aggregators.
+
+    The fallback cache of subscription payloads is covered by test_sub_cache.py.
+    """
 
     def test_fetch_all_excludes_goida_bulk_mirrors(self):
         """Fetcher only queries user-configured subscriptions and does not append Goida mirrors."""
@@ -332,39 +335,6 @@ class TestFreshOnDemandFetcher(unittest.TestCase):
         self.assertEqual(queried_urls, ["https://example.com/custom_sub.txt"])
         self.assertNotIn("goida", str(queried_urls).lower())
         self.assertEqual(len(nodes), 1)
-
-    def test_fetcher_does_not_accumulate_disk_cache(self):
-        """_process_url performs live HTTP request and does not write to sub_cache directory."""
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            test_url = "https://example.com/sub.txt"
-            fetcher = NodeFetcher(config={"subscriptions": [test_url]})
-
-            # Simulate successful HTTP response
-            mock_session = MagicMock()
-            mock_resp = MagicMock()
-            mock_resp.status = 200
-            node_line = b"vless://uuid@1.2.3.4:443?type=tcp#NodeA\n"
-
-            async def async_read():
-                return node_line
-
-            mock_resp.read = async_read
-
-            class AsyncContextManager:
-                async def __aenter__(self):
-                    return mock_resp
-
-                async def __aexit__(self, exc_type, exc_val, exc_tb):
-                    pass
-
-            mock_session.get.return_value = AsyncContextManager()
-
-            nodes = asyncio.run(fetcher._process_url(mock_session, test_url))
-            self.assertEqual(len(nodes), 1)
-
-            # Check that sub_cache directory was not created or populated in tmp_dir
-            sub_cache_path = os.path.join(tmp_dir, "sub_cache")
-            self.assertFalse(os.path.exists(sub_cache_path))
 
     def test_fetcher_with_empty_remote_subscriptions_loads_local_awg(self):
         """When subscriptions list is empty, fetcher still discovers local AmneziaWG .conf files."""
