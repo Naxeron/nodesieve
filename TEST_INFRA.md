@@ -2,7 +2,7 @@
 
 ## 1. Overview & Test Philosophy
 
-The testing framework for Proxy Site Checker provides an end-to-end, multi-tier testing pipeline ensuring that candidate proxy nodes and router configurations are 100% representative of real OpenWrt router environments.
+The testing framework for nodesieve provides an end-to-end, multi-tier testing pipeline ensuring that candidate proxy nodes and router configurations are 100% representative of real OpenWrt router environments.
 
 The framework adheres to an **opaque-box, requirement-driven** methodology:
 - **Opaque-Box Verification**: Tests validate observable behaviors, network interactions, return codes, structured configurations, and interface contracts without coupling to private internal state.

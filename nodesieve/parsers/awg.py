@@ -2,7 +2,7 @@
 
 import os
 from typing import Optional
-from proxy_sites.logging import log
+from nodesieve.logging import log
 
 
 def parse_amnezia_conf(conf_path: str, proxy_name: str = "AmneziaWG") -> Optional[dict]:

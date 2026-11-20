@@ -15,11 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
-import proxy_sites.ui.dashboard as dashboard_module
-from proxy_sites.core.router_validator import RouterValidator
-from proxy_sites.core.tester import TRACE_URL_IPV4, TRACE_URL_IPV6, NodeTester
-from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict, without_mux
-from proxy_sites.ui.dashboard import VPNDashboard
+import nodesieve.ui.dashboard as dashboard_module
+from nodesieve.core.router_validator import RouterValidator
+from nodesieve.core.tester import TRACE_URL_IPV4, TRACE_URL_IPV6, NodeTester
+from nodesieve.parsers.mihomo import node_url_to_mihomo_dict, without_mux
+from nodesieve.ui.dashboard import VPNDashboard
 
 VISION = (
     "vless://uuid@vision.example:443?security=reality&flow=xtls-rprx-vision"
@@ -87,9 +87,9 @@ class _Servers:
 @pytest.fixture
 def servers():
     farm = _Servers()
-    with patch("proxy_sites.core.tester.MihomoRunner", farm.mihomo), \
+    with patch("nodesieve.core.tester.MihomoRunner", farm.mihomo), \
             patch.object(NodeTester, "_fetch_ip", farm.trace), \
-            patch("proxy_sites.core.tester.GeolocationService.get_country_name",
+            patch("nodesieve.core.tester.GeolocationService.get_country_name",
                   AsyncMock(return_value="United States")):
         yield farm
 
@@ -187,8 +187,8 @@ def test_steer_node_is_checked_without_multiplexing_and_never_probed(servers):
                 "families": {"ipv4": copy.deepcopy(summary)}}
     node = ws_node("plain.example")
     with patch.object(NodeTester, "fetch_location", AsyncMock(return_value=location)), \
-            patch("proxy_sites.core.tester.aiohttp.TCPConnector"), \
-            patch("proxy_sites.core.tester.aiohttp.ClientSession") as session:
+            patch("nodesieve.core.tester.aiohttp.TCPConnector"), \
+            patch("nodesieve.core.tester.aiohttp.ClientSession") as session:
         session.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
         session.return_value.__aexit__ = AsyncMock(return_value=False)
         tester, (survivor, _, _) = check(node, routing={"enabled": True})
@@ -220,10 +220,10 @@ def test_scan_reports_multiplexing_and_deploys_it_only_where_it_works(servers, c
     with patch.object(dashboard, "_get_real_ip", AsyncMock(return_value=None)), \
             patch.object(dashboard, "filter_tcp", AsyncMock(return_value=nodes)), \
             patch.object(dashboard, "run_speedtest_nodes_async", speedtest), \
-            patch("proxy_sites.ui.dashboard.ResourceLimits.get_max_safe_workers", return_value=(2, 8192)), \
-            patch("proxy_sites.ui.dashboard.NodeFetcher.fetch_all", AsyncMock(return_value=(nodes, {}))), \
-            patch("proxy_sites.ui.dashboard.MihomoManager.setup"), \
-            caplog.at_level("INFO", logger="ProxySiteChecker"):
+            patch("nodesieve.ui.dashboard.ResourceLimits.get_max_safe_workers", return_value=(2, 8192)), \
+            patch("nodesieve.ui.dashboard.NodeFetcher.fetch_all", AsyncMock(return_value=(nodes, {}))), \
+            patch("nodesieve.ui.dashboard.MihomoManager.setup"), \
+            caplog.at_level("INFO", logger="nodesieve"):
         assert asyncio.run(dashboard.run_pipeline_async(check_only=True))
 
     assert "Multiplexing: 1 of 2 eligible working nodes support it; the rest are used without it." in caplog.text

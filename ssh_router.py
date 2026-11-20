@@ -1,6 +1,5 @@
 """Router SSH execution helper script modernized with Paramiko."""
 
-import os
 import sys
 from typing import Any, Dict, Optional
 
@@ -61,12 +60,12 @@ def run_ssh(
 
 
 def saved_router_settings() -> Dict[str, Any]:
-    """Router connection settings saved in proxy_sites_config.json, as run_ssh arguments."""
+    """Router connection settings saved in nodesieve_config.json, as run_ssh arguments."""
     try:
-        from proxy_sites.config import ConfigManager
-        from proxy_sites.constants import CONFIG_FILE, PROJECT_ROOT
+        from nodesieve.config import ConfigManager
+        from nodesieve.constants import PROJECT_ROOT
 
-        config = ConfigManager.load(os.path.join(PROJECT_ROOT, CONFIG_FILE))
+        config = ConfigManager.load(ConfigManager.default_path(PROJECT_ROOT))
     except Exception:
         return {}
     return {

@@ -7,18 +7,18 @@ import urllib.parse
 from typing import Optional, Set, Tuple
 import aiohttp
 
-from proxy_sites.constants import GEOBLOCKED_REGIONS, IPREGION_SCRIPT_PATH
-from proxy_sites.core.mihomo import MihomoRunner
-from proxy_sites.geo import GeolocationService
-from proxy_sites.logging import ErrorTracker, safe_close_writer, safe_print
-from proxy_sites.parsers.base import (
+from nodesieve.constants import GEOBLOCKED_REGIONS, IPREGION_SCRIPT_PATH
+from nodesieve.core.mihomo import MihomoRunner
+from nodesieve.geo import GeolocationService
+from nodesieve.logging import ErrorTracker, safe_close_writer, safe_print
+from nodesieve.parsers.base import (
     extract_host_port,
     format_descriptive_node_name,
     get_node_name,
 )
-from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict, without_mux
-from proxy_sites.routing import main_policy_failure, normalize_routing
-from proxy_sites.location import probe_ipregion
+from nodesieve.parsers.mihomo import node_url_to_mihomo_dict, without_mux
+from nodesieve.routing import main_policy_failure, normalize_routing
+from nodesieve.location import probe_ipregion
 
 # Cloudflare's trace endpoint by address, one per IP family.
 TRACE_URL_IPV4 = "https://1.1.1.1/cdn-cgi/trace"

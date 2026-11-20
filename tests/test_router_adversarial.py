@@ -12,8 +12,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from proxy_sites.router.client import RouterClient
-from proxy_sites.router.pusher import push_to_router
+from nodesieve.router.client import RouterClient
+from nodesieve.router.pusher import push_to_router
 
 ROUTER_HOST = "192.168.1.1"
 ROUTER_SSH_PORT = 22
@@ -140,7 +140,7 @@ class TestStreamFileToRouterHardware(unittest.TestCase):
         """Verifies exact round-trip string preservation across alphabets."""
         unicode_corpus = {
             "chinese": "你好世界，测试节点：Gemini 节点 123",
-            "japanese": "こんにちは世界！Proxy Site Checkerテスト 🇯🇵",
+            "japanese": "こんにちは世界！nodesieveテスト 🇯🇵",
             "russian": "Привет, мир! Тестирование маршрутизатора OpenWrt 🇷🇺",
             "emojis": "🚀⚡🔥🎉🛡️🤖 🇭🇰 🇯🇵 🇺🇸 🇸🇬",
             "arabic": "مرحبا بالعالم اختبار التوجيه",
@@ -222,7 +222,7 @@ class TestPusherAdversarial(unittest.TestCase):
     def test_push_missing_script_file_returns_false(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             missing = os.path.join(tmp_dir, "missing.sh")
-            with patch("proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", missing):
+            with patch("nodesieve.router.pusher.ROUTER_SCRIPT_FILE", missing):
                 res = push_to_router()
                 self.assertFalse(res)
 
@@ -234,7 +234,7 @@ class TestPusherAdversarial(unittest.TestCase):
         os.chmod(unreadable, 000)
         try:
             with patch(
-                "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", unreadable
+                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", unreadable
             ):
                 res = push_to_router()
                 self.assertFalse(res)
@@ -255,7 +255,7 @@ class TestPusherAdversarial(unittest.TestCase):
                 side_effect=socket.timeout("SSH connect timeout"),
             ):
                 with patch(
-                    "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", script_path
+                    "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_path
                 ):
                     res = push_to_router(router_client=unreachable)
                     self.assertFalse(res)
@@ -301,7 +301,7 @@ class TestPusherAdversarial(unittest.TestCase):
                 f.write("#!/bin/sh\necho 'Service failed' >&2\nexit 1\n")
 
             with patch(
-                "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", script_path
+                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_path
             ):
                 res = push_to_router(router_client=mock_client)
                 self.assertFalse(
@@ -331,7 +331,7 @@ class TestPusherAdversarial(unittest.TestCase):
                 f.write("#!/bin/sh\nif [ ; then fi\n")
 
             with patch(
-                "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", script_path
+                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_path
             ):
                 res = push_to_router(router_client=mock_client)
                 self.assertFalse(

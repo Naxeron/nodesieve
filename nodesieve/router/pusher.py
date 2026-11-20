@@ -3,10 +3,10 @@
 import os
 from typing import Optional
 
-from proxy_sites.config import ConfigManager
-from proxy_sites.constants import PROJECT_ROOT, ROUTER_SCRIPT_FILE
-from proxy_sites.logging import log
-from proxy_sites.router.client import RouterClient
+from nodesieve.config import ConfigManager
+from nodesieve.constants import PROJECT_ROOT, ROUTER_SCRIPT_FILE
+from nodesieve.logging import log
+from nodesieve.router.client import RouterClient
 
 
 def push_to_router(

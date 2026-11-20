@@ -12,7 +12,7 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from proxy_sites.core.fetcher import NodeFetcher
+from nodesieve.core.fetcher import NodeFetcher
 
 URL = "https://sub.example.com/api/v1/client/subscribe?token=SECRET123"
 NODE_A = "vless://uuid-a@1.1.1.1:443?type=tcp&security=tls#NodeA"
@@ -96,7 +96,7 @@ class TestSubscriptionCache(unittest.TestCase):
     def test_failed_fetch_uses_cached_nodes(self):
         self.fetch(_Response(200, _payload(NODE_A, NODE_B)))
         for name, failure in FAILURES.items():
-            with self.subTest(name), self.assertLogs("ProxySiteChecker", "WARNING") as logs:
+            with self.subTest(name), self.assertLogs("nodesieve", "WARNING") as logs:
                 self.assertEqual(self.fetch(failure), [NODE_A, NODE_B])
             self.assertTrue(any("Using 2 cached nodes" in line for line in logs.output), logs.output)
 
@@ -135,7 +135,7 @@ class TestSubscriptionCache(unittest.TestCase):
             with self.subTest(broken=broken):
                 with open(cache_path, "w", encoding="utf-8") as cache_file:
                     cache_file.write(broken)
-                with self.assertLogs("ProxySiteChecker", "WARNING") as logs:
+                with self.assertLogs("nodesieve", "WARNING") as logs:
                     self.assertEqual(self.fetch(FAILURES["HTTP 503"]), [])
                 self.assertTrue(any("Ignoring unreadable cache" in line for line in logs.output), logs.output)
 
@@ -147,7 +147,7 @@ class TestSubscriptionCache(unittest.TestCase):
         with open(blocker, "w", encoding="utf-8") as blocker_file:
             blocker_file.write("")
         self.cache_dir = os.path.join(blocker, "sub_cache")
-        with self.assertLogs("ProxySiteChecker", "WARNING") as logs:
+        with self.assertLogs("nodesieve", "WARNING") as logs:
             self.assertEqual(self.fetch(_Response(200, _payload(NODE_A))), [NODE_A])
         self.assertTrue(any("Could not cache subscription" in line for line in logs.output), logs.output)
 

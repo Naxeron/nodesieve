@@ -8,12 +8,12 @@ import shlex
 import sys
 from typing import List, Optional
 
-from proxy_sites.config import ConfigManager
-from proxy_sites.constants import CONFIG_FILE, CRASHED_LOG_FILE, PROJECT_ROOT
-from proxy_sites.logging import log
-from proxy_sites.routing import normalize_routing
-from proxy_sites.ui.dashboard import VPNDashboard
-from proxy_sites.ui.routing import format_routing, routing_menu
+from nodesieve.config import ConfigManager
+from nodesieve.constants import CRASHED_LOG_FILE, PROJECT_ROOT
+from nodesieve.logging import log
+from nodesieve.routing import normalize_routing
+from nodesieve.ui.dashboard import VPNDashboard
+from nodesieve.ui.routing import format_routing, routing_menu
 
 
 def clear_screen() -> None:
@@ -34,10 +34,10 @@ class _ActionCapture(argparse.Action):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Constructs the modern single-command argument parser for check_proxy_sites."""
+    """Constructs the modern single-command argument parser for nodesieve."""
     parser = argparse.ArgumentParser(
-        prog="check_proxy_sites",
-        description="Proxy Site Checker - Check VPN proxy exit IPs and locations and configure Mihomo or Steer routing",
+        prog="python -m nodesieve",
+        description="nodesieve - Check VPN proxy exit IPs and locations and configure Mihomo or Steer routing",
     )
 
     # Positional action (defaults to "run")
@@ -214,7 +214,7 @@ def manage_subscriptions(config: dict, dash: Optional[VPNDashboard] = None) -> N
 
 def settings_menu(config: dict) -> None:
     """Displays active configuration settings."""
-    print("=== Proxy Site Checker Settings ===")
+    print("=== nodesieve Settings ===")
     print(f"TCP Workers: {config.get('tcp_workers', 128)}")
     print(f"HTTP Workers: {config.get('workers', 'auto')}")
     print(f"Allowed Countries: {', '.join(config.get('allowed_countries', [])) or 'ALL'}")
@@ -237,7 +237,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         pass
 
     # Load configuration
-    cfg_path = args.config_file or os.path.join(PROJECT_ROOT, CONFIG_FILE)
+    cfg_path = args.config_file or ConfigManager.default_path(PROJECT_ROOT)
     try:
         config = ConfigManager.load(cfg_path)
     except ValueError as exc:
@@ -312,7 +312,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 sys.exit(1)
             print(f"Saved routing preferences to {cfg_path}.")
             if draft["routing"]["enabled"]:
-                command = "python check_proxy_sites.py check"
+                command = "python -m nodesieve check"
                 if args.config_file:
                     command += " --config-file " + shlex.quote(cfg_path)
                 print(f"Run `{command}` to test proxies and generate routing artifacts.")
@@ -450,7 +450,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     dash = VPNDashboard(config=config)
 
-    log.info("[*] Starting Proxy Site Checker pipeline...")
+    log.info("[*] Starting nodesieve pipeline...")
     success = asyncio.run(
         dash.run_pipeline_async(
             check_only=check_only,

@@ -1,21 +1,22 @@
-# Proxy Site Checker
+# nodesieve
 
-Check VPN proxy nodes by their exit IP — reachability, exit address, country and
-location agreement — measure performance, and deploy suitable nodes to an OpenWrt
-router using Mihomo.
+nodesieve checks VPN proxy nodes by their exit IP — reachability, exit address,
+country and location agreement — measures performance, and deploys suitable nodes
+to an OpenWrt router using Mihomo.
 
 Also supports **Steer** from [Zapret Manager](https://github.com/StressOzz/Zapret-Manager):
-the checker ranks nodes by location agreement and supplies the servers of Steer's
+nodesieve ranks nodes by location agreement and supplies the servers of Steer's
 main section.
 
 ```sh
 pip install -r requirements.txt
-python check_proxy_sites.py --add-sub "https://example.org/your-subscription"
-python check_proxy_sites.py check
+python -m nodesieve --add-sub "https://example.org/your-subscription"
+python -m nodesieve check
 ```
 
-Use `check` to test and verify nodes. The default `run` action also deploys results
-to the configured router. `--help` lists every option.
+Run the commands in the project directory. Use `check` to test and verify nodes. The
+default `run` action also deploys results to the configured router. `--help` lists
+every option.
 
 ## Setup
 
@@ -25,7 +26,7 @@ Developed and tested on Linux with Python 3.14.
   [Mihomo](https://github.com/MetaCubeX/mihomo) instance. If the project directory
   has no `mihomo` binary, the first check downloads the latest alpha build for this
   platform from Mihomo's GitHub releases.
-- **Settings** are stored in `proxy_sites_config.json` in the project directory. The
+- **Settings** are stored in `nodesieve_config.json` in the project directory. The
   file is created the first time settings are saved, for example by `--add-sub`, and
   git ignores it because it holds subscription links and router credentials.
   `--show-config` prints the active settings and `--remove-sub` removes a
@@ -40,7 +41,7 @@ Developed and tested on Linux with Python 3.14.
   `router_host` (default `192.168.1.1`) and log in over SSH as `router_ssh_user`
   (default `root`). While `router_ssh_pass` is empty, which is the default, the SSH
   agent and default key files are used. For password login, set `router_ssh_pass`
-  in `proxy_sites_config.json` or pass `--router-ssh-pass` for a single run.
+  in `nodesieve_config.json` or pass `--router-ssh-pass` for a single run.
 - **WARP (optional).** `use_warp_scanner` adds Cloudflare WARP endpoints to a scan.
   They connect with your own WARP registration, for example from a
   [wgcf](https://github.com/ViRb3/wgcf) profile: put its private key in
@@ -96,7 +97,7 @@ supports it, which a link doesn't say, and a server without it, which includes e
 Xray server, drops each multiplexed connection. So a node is always checked without
 multiplexing. One that qualifies is then asked for a single request through it and
 keeps multiplexing, in the speedtest and on the router, only if it answers; the scan
-reports how many nodes do. Set `use_mux` to `false` in `proxy_sites_config.json` to
+reports how many nodes do. Set `use_mux` to `false` in `nodesieve_config.json` to
 skip that request. Steer connects with its own core, so a Steer scan never asks.
 
 ### Mihomo target
@@ -112,8 +113,8 @@ automatic rollback.
 Open the terminal menu, set the location preferences, enable Steer, and save:
 
 ```sh
-python check_proxy_sites.py routing
-python check_proxy_sites.py check
+python -m nodesieve routing
+python -m nodesieve check
 ```
 
 Steer mode supplies the servers of Steer's **main section**. The menu edits excluded
@@ -145,7 +146,7 @@ then latency. Which of them carries traffic is Steer's own server selection
 setting: "first working" follows this order, so the best-agreed node is used while
 it works; "by ping" picks the fastest of the list regardless of agreement.
 
-These preferences live under `routing.main` in `proxy_sites_config.json`; see
+These preferences live under `routing.main` in `nodesieve_config.json`; see
 [examples/steer-routing.json](examples/steer-routing.json):
 
 ```json
@@ -175,7 +176,7 @@ nothing is deployed: there is no fallback to an unqualified proxy.
 After inspecting the report, deploy with:
 
 ```sh
-python check_proxy_sites.py deploy
+python -m nodesieve deploy
 ```
 
 The default `run` action performs both checking and deployment. `--dry-run` runs
@@ -186,9 +187,9 @@ older than 24 hours or generated for different preferences/router.
 For one-off use without saving preferences:
 
 ```sh
-python check_proxy_sites.py check --target steer --output-dir steer-output
-python check_proxy_sites.py deploy --target steer --output-dir steer-output
-python check_proxy_sites.py --routing-show
+python -m nodesieve check --target steer --output-dir steer-output
+python -m nodesieve deploy --target steer --output-dir steer-output
+python -m nodesieve --routing-show
 ```
 
 Deployment streams the script to the router over SSH. The script never edits
@@ -203,7 +204,7 @@ them. In order, it:
    once.
 2. Remembers what the section uses now, a subscription link or its own servers.
 3. **Replaces the servers of the main section with the scanned list.** A subscription
-   connected there is replaced too and no longer updates itself; the checker becomes
+   connected there is replaced too and no longer updates itself; nodesieve becomes
    the source of the list. Services, devices, exclusions and other sections are not
    touched.
 4. Waits for the panel to finish and checks that Steer shows the new list.
@@ -224,7 +225,7 @@ ssh root@192.168.1.1 'PSC_CHECK_ONLY=1 sh -s' < steer-output/apply_steer.sh
   from it.
 - **Location of checks:** Steer probes run on this computer. The Mihomo router
   validator is skipped because it stages nodes on Mihomo, not on Steer.
-  Subscription nodes supported by this checker/exporter are VLESS, Trojan, and
+  Subscription nodes supported by nodesieve's Steer export are VLESS, Trojan, and
   Shadowsocks; local AWG/WARP pseudo-URLs cannot be exported as server links.
 - **Freshness:** Steer keeps choosing among the scanned servers by reachability or
   ping. It does not recheck location agreement or country exclusions. Rerun
@@ -235,6 +236,15 @@ ssh root@192.168.1.1 'PSC_CHECK_ONLY=1 sh -s' < steer-output/apply_steer.sh
   the panel backend.
 
 ## Upgrading from earlier versions
+
+**Proxy Site Checker was renamed to nodesieve:**
+
+- Run `python -m nodesieve` where you ran `python check_proxy_sites.py`. The actions
+  and options are the same.
+- The Python package `proxy_sites` is now `nodesieve`.
+- Settings move from `proxy_sites_config.json` to `nodesieve_config.json`: the first
+  run renames the file, so subscriptions and router credentials carry over. If both
+  files exist, only `nodesieve_config.json` is read. A `--config-file` is used as given.
 
 Earlier versions also probed Gemini, Twitter/X, ChatGPT, Grok and Discord, and
 deployed to Forkozz (NetShift) with a separate route for each. Both are gone:
@@ -252,8 +262,6 @@ deployed to Forkozz (NetShift) with a separate route for each. Both are gone:
 - The Mihomo router configuration no longer opens the extra verification listener
   on port 7891, and `--router-test-port` no longer exists.
 
-The command-line entry point is `check_proxy_sites.py`, the Python package is
-`proxy_sites`, and settings are stored in `proxy_sites_config.json`.
 See [PROJECT.md](PROJECT.md) for pipeline
 architecture and [TEST_INFRA.md](TEST_INFRA.md) for testing details.
 

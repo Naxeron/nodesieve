@@ -6,8 +6,8 @@ import shutil
 
 import pytest
 
-from proxy_sites.constants import IPREGION_SCRIPT_PATH
-from proxy_sites.location import GEOIP_GROUP, REPORT_VERSION
+from nodesieve.constants import IPREGION_SCRIPT_PATH
+from nodesieve.location import GEOIP_GROUP, REPORT_VERSION
 import update_ipregion
 
 OLD = "1" * 40

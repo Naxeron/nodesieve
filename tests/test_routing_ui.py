@@ -8,9 +8,9 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from proxy_sites.routing import normalize_routing
-from proxy_sites.ui.cli import build_parser, main
-from proxy_sites.ui.routing import format_routing, routing_menu
+from nodesieve.routing import normalize_routing
+from nodesieve.ui.cli import build_parser, main
+from nodesieve.ui.routing import format_routing, routing_menu
 
 
 class RoutingMenuTests(unittest.TestCase):
@@ -123,9 +123,9 @@ class RoutingCLITests(unittest.TestCase):
 
     def invoke(self, args, tty=False, menu_result=None):
         with (
-            patch("proxy_sites.ui.cli.sys.stdin.isatty", return_value=tty),
-            patch("proxy_sites.ui.cli.routing_menu", return_value=menu_result) as menu,
-            patch("proxy_sites.ui.cli.VPNDashboard") as dashboard,
+            patch("nodesieve.ui.cli.sys.stdin.isatty", return_value=tty),
+            patch("nodesieve.ui.cli.routing_menu", return_value=menu_result) as menu,
+            patch("nodesieve.ui.cli.VPNDashboard") as dashboard,
             patch("sys.stdout", new_callable=io.StringIO) as output,
             self.assertRaises(SystemExit) as raised,
         ):
@@ -183,7 +183,7 @@ class RoutingCLITests(unittest.TestCase):
         routing["enabled"] = True
         with open(self.config_file, "w", encoding="utf-8") as stream:
             json.dump({"routing": routing}, stream)
-        with patch("proxy_sites.ui.cli.VPNDashboard") as dashboard:
+        with patch("nodesieve.ui.cli.VPNDashboard") as dashboard:
             dashboard.return_value.run_pipeline_async = AsyncMock(return_value=True)
             main(["--config-file", self.config_file, "check", "--target", "mihomo"])
         self.assertFalse(dashboard.call_args.kwargs["config"]["routing"]["enabled"])

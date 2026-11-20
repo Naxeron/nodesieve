@@ -8,14 +8,14 @@ import os
 import re
 from typing import List, Optional
 import yaml
-from proxy_sites.config import ConfigManager
-from proxy_sites.constants import PROJECT_ROOT, ROUTER_SCRIPT_FILE
-from proxy_sites.logging import log
-from proxy_sites.parsers.awg import parse_amnezia_conf
-from proxy_sites.parsers.base import extract_host_port, get_node_name
-from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict
-from proxy_sites.router.config_builder import build_router_config_yaml
-from proxy_sites.warp import WarpScanner
+from nodesieve.config import ConfigManager
+from nodesieve.constants import PROJECT_ROOT, ROUTER_SCRIPT_FILE
+from nodesieve.logging import log
+from nodesieve.parsers.awg import parse_amnezia_conf
+from nodesieve.parsers.base import extract_host_port, get_node_name
+from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
+from nodesieve.router.config_builder import build_router_config_yaml
+from nodesieve.warp import WarpScanner
 
 
 def generate_router_script(

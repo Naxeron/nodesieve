@@ -9,14 +9,14 @@ import socket
 import unittest
 import yaml
 
-from proxy_sites import constants
-from proxy_sites.router.config_builder import build_router_config_yaml
-from proxy_sites.parsers.base import (
+from nodesieve import constants
+from nodesieve.router.config_builder import build_router_config_yaml
+from nodesieve.parsers.base import (
     extract_host_port,
     get_node_name,
     extract_node_protocol,
 )
-from proxy_sites.core.mihomo import safe_close_writer
+from nodesieve.core.mihomo import safe_close_writer
 
 
 def parse_yaml_safely(yaml_str: str) -> dict:

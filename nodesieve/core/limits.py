@@ -1,8 +1,8 @@
 """System resource discovery, file descriptor scaling, and concurrency limit calculations."""
 
 from typing import Optional, Tuple
-from proxy_sites.constants import IS_TERMUX
-from proxy_sites.logging import get_free_memory_mb
+from nodesieve.constants import IS_TERMUX
+from nodesieve.logging import get_free_memory_mb
 
 
 class ResourceLimits:

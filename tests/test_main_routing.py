@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from proxy_sites.routing import DEFAULT_ROUTING, main_location_rank, main_policy_failure, normalize_routing, select_main_pool
+from nodesieve.routing import DEFAULT_ROUTING, main_location_rank, main_policy_failure, normalize_routing, select_main_pool
 
 
 def consensus(counts):

@@ -2,8 +2,8 @@
 
 import re
 from typing import List, Optional
-from proxy_sites.constants import ROUTER_CONFIG_TEMPLATE
-from proxy_sites.parsers.awg import generate_awg_proxy_yaml
+from nodesieve.constants import ROUTER_CONFIG_TEMPLATE
+from nodesieve.parsers.awg import generate_awg_proxy_yaml
 
 
 def build_router_config_yaml(

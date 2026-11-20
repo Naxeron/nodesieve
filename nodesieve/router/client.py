@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import aiohttp
 import paramiko
 
-from proxy_sites.logging import log
+from nodesieve.logging import log
 
 
 class RouterClient:

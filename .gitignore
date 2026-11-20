@@ -1,4 +1,6 @@
-# Local settings: subscription links and router credentials
+# Local settings: subscription links and router credentials. proxy_sites_config.json
+# is the file's name before the project was renamed; the first run renames it.
+/nodesieve_config.json
 /proxy_sites_config.json
 
 # Written by the checker; these hold proxy credentials

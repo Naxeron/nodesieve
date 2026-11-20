@@ -15,17 +15,17 @@ import zipfile
 from typing import Optional, Set
 import yaml
 
-from proxy_sites.constants import (
+from nodesieve.constants import (
     CONFIG_YAML_TEMPLATE,
     CRASHED_LOG_FILE,
     MIHOMO_PATH,
     PROJECT_ROOT,
 )
-from proxy_sites.logging import ErrorTracker, log, safe_close_writer, safe_print
-from proxy_sites.parsers.awg import generate_awg_proxy_yaml, parse_amnezia_conf
-from proxy_sites.parsers.base import extract_host_port, get_node_name
-from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict
-from proxy_sites.warp import WarpScanner
+from nodesieve.logging import ErrorTracker, log, safe_close_writer, safe_print
+from nodesieve.parsers.awg import generate_awg_proxy_yaml, parse_amnezia_conf
+from nodesieve.parsers.base import extract_host_port, get_node_name
+from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
+from nodesieve.warp import WarpScanner
 
 
 class MihomoManager:

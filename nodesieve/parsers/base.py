@@ -5,7 +5,7 @@ import os
 import re
 import urllib.parse
 from typing import Optional, Tuple
-from proxy_sites.constants import PROJECT_ROOT
+from nodesieve.constants import PROJECT_ROOT
 
 
 def get_flag_emoji(country_code: str) -> str:
@@ -108,7 +108,7 @@ def extract_host_port(node_uri: str) -> Tuple[Optional[str], Optional[int]]:
             return None, None
 
         if node_uri.startswith("awg_conf:"):
-            from proxy_sites.parsers.awg import parse_amnezia_conf
+            from nodesieve.parsers.awg import parse_amnezia_conf
 
             try:
                 conf_name = node_uri.split("awg_conf:", 1)[1].split("#", 1)[0]

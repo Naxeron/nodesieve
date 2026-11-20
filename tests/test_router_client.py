@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import aiohttp
 from aiohttp import web
 
-from proxy_sites.router.client import RouterClient
-from proxy_sites.router.pusher import push_to_router
+from nodesieve.router.client import RouterClient
+from nodesieve.router.pusher import push_to_router
 import ssh_router
 
 
@@ -433,7 +433,7 @@ class TestPusher(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             non_existent = os.path.join(tmp_dir, "does_not_exist.sh")
             with patch(
-                "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", non_existent
+                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", non_existent
             ):
                 res = push_to_router()
                 self.assertFalse(res)
@@ -448,7 +448,7 @@ class TestPusher(unittest.TestCase):
             mock_client.stream_file_to_router.return_value = False
 
             with patch(
-                "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", script_file
+                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_file
             ):
                 res = push_to_router(router_client=mock_client)
                 self.assertFalse(res)
@@ -470,7 +470,7 @@ class TestPusher(unittest.TestCase):
             mock_client.exec_command.return_value = (1, "", "syntax error")
 
             with patch(
-                "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", script_file
+                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_file
             ):
                 res = push_to_router(router_client=mock_client)
                 self.assertFalse(res)
@@ -496,7 +496,7 @@ class TestPusher(unittest.TestCase):
             )
 
             with patch(
-                "proxy_sites.router.pusher.ROUTER_SCRIPT_FILE", script_file
+                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_file
             ):
                 res = push_to_router(router_client=mock_client)
                 self.assertTrue(res)

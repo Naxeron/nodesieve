@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from proxy_sites.core.tester import NodeTester
+from nodesieve.core.tester import NodeTester
 
 
 class MockRequestContext:
@@ -98,7 +98,7 @@ class TestNodeTester(unittest.TestCase):
             mock_runner.proxy_url = "http://127.0.0.1:12345"
             mock_runner.port = 12345
 
-            with patch("proxy_sites.core.tester.MihomoRunner") as MockRunner:
+            with patch("nodesieve.core.tester.MihomoRunner") as MockRunner:
                 MockRunner.return_value.__aenter__.return_value = mock_runner
                 chunk_data = b"0" * 131072  # 128KB chunk
 
@@ -139,7 +139,7 @@ class TestNodeTester(unittest.TestCase):
             mock_runner.proxy_url = "http://127.0.0.1:12345"
             mock_runner.port = 12345
 
-            with patch("proxy_sites.core.tester.MihomoRunner") as MockRunner:
+            with patch("nodesieve.core.tester.MihomoRunner") as MockRunner:
                 MockRunner.return_value.__aenter__.return_value = mock_runner
                 with patch.object(self.tester, "_fetch_ip", return_value=(None, None, 99999.0)):
                     with patch.object(self.tester, "fetch_location") as mock_location:
@@ -181,11 +181,11 @@ class TestNodeTester(unittest.TestCase):
             mock_runner = AsyncMock()
             mock_runner.proxy_url = "http://127.0.0.1:12345"
             mock_runner.port = 12345
-            with patch("proxy_sites.core.tester.MihomoRunner") as MockRunner, \
+            with patch("nodesieve.core.tester.MihomoRunner") as MockRunner, \
                     patch.object(tester, "_fetch_ip", new=AsyncMock(side_effect=list(traces))), \
-                    patch("proxy_sites.core.tester.GeolocationService.get_country_name",
+                    patch("nodesieve.core.tester.GeolocationService.get_country_name",
                           new=AsyncMock(return_value=country_name)), \
-                    patch("proxy_sites.core.tester.GeolocationService.get_ip_country",
+                    patch("nodesieve.core.tester.GeolocationService.get_ip_country",
                           new=AsyncMock(return_value=patches.get("ip_country"))):
                 MockRunner.return_value.__aenter__.return_value = mock_runner
                 return await tester.test_node_full(1, node)

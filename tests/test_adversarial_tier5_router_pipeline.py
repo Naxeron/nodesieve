@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 from aiohttp import web
 
-from proxy_sites.core.router_validator import RouterUnreachableError, RouterValidator
-from proxy_sites.router.client import RouterClient
+from nodesieve.core.router_validator import RouterUnreachableError, RouterValidator
+from nodesieve.router.client import RouterClient
 
 
 def get_ephemeral_port() -> int:

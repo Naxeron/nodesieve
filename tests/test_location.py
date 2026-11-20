@@ -11,9 +11,9 @@ import unittest
 import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from proxy_sites.location import empty_location, parse_ipregion, probe_ipregion
-from proxy_sites.core.tester import NodeTester
-from proxy_sites.routing import main_policy_failure, normalize_routing
+from nodesieve.location import empty_location, parse_ipregion, probe_ipregion
+from nodesieve.core.tester import NodeTester
+from nodesieve.routing import main_policy_failure, normalize_routing
 
 
 AUTO = object()
@@ -140,7 +140,7 @@ class TestLocationSubprocess(unittest.IsolatedAsyncioTestCase):
             child_pid_file = Path(directory) / "child.pid"
             script.write_text("#!/bin/bash\n(trap '' TERM; echo $BASHPID > \"$PSC_CHILD_PID\"; sleep 30) &\nwait\n")
             with patch.dict(os.environ, {"PSC_CHILD_PID": str(child_pid_file)}), \
-                    patch("proxy_sites.location.shutil.which", return_value=bash):
+                    patch("nodesieve.location.shutil.which", return_value=bash):
                 evidence = await probe_ipregion(script, "127.0.0.1:23456", timeout=.1)
             self.assertEqual(evidence["reason"], "ipregion timed out")
             self.assertTrue(child_pid_file.is_file())
@@ -153,10 +153,10 @@ class TestLocationSubprocess(unittest.IsolatedAsyncioTestCase):
         process.communicate = AsyncMock(return_value=(json.dumps(report()).encode(), b""))
         # Only what the bundled script itself needs: column and nslookup are no longer used.
         installed = {"bash", "jq", "curl"}
-        with patch("proxy_sites.location.shutil.which",
+        with patch("nodesieve.location.shutil.which",
                    side_effect=lambda name: "/usr/bin/" + name if name in installed else None), \
-                patch("proxy_sites.location.Path.is_file", return_value=True), \
-                patch("proxy_sites.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)) as spawn:
+                patch("nodesieve.location.Path.is_file", return_value=True), \
+                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)) as spawn:
             evidence = await probe_ipregion("/tmp/ipregion.sh", "127.0.0.1:23456", families=["ipv4"])
         self.assertEqual(evidence["country"], "DE")
         self.assertEqual(spawn.call_args.args, (
@@ -168,8 +168,8 @@ class TestLocationSubprocess(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spawn.call_args.kwargs["env"]["NO_PROXY"], "")
 
     async def test_missing_dependencies_do_not_launch_installer(self):
-        with patch("proxy_sites.location.shutil.which", return_value=None), \
-                patch("proxy_sites.location.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+        with patch("nodesieve.location.shutil.which", return_value=None), \
+                patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
             evidence = await probe_ipregion("ipregion.sh", "127.0.0.1:23456")
         self.assertEqual(evidence["status"], "failed")
         self.assertIn("Missing dependencies", evidence["reason"])
@@ -189,10 +189,10 @@ class TestLocationSubprocess(unittest.IsolatedAsyncioTestCase):
                 def kill_group(pid, sig):
                     if sig == signal.SIGTERM:
                         finish.set()
-                with patch("proxy_sites.location.shutil.which", return_value="/usr/bin/tool"), \
-                        patch("proxy_sites.location.Path.is_file", return_value=True), \
-                        patch("proxy_sites.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)), \
-                        patch("proxy_sites.location.os.killpg", side_effect=kill_group) as kill:
+                with patch("nodesieve.location.shutil.which", return_value="/usr/bin/tool"), \
+                        patch("nodesieve.location.Path.is_file", return_value=True), \
+                        patch("nodesieve.location.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)), \
+                        patch("nodesieve.location.os.killpg", side_effect=kill_group) as kill:
                     task = asyncio.create_task(probe_ipregion("/tmp/script.sh", "127.0.0.1:23456", timeout=.01))
                     await started.wait()
                     if cancel:
@@ -209,12 +209,12 @@ class TestMainLocationIntegration(unittest.IsolatedAsyncioTestCase):
         tester = NodeTester({"routing": {"enabled": True}}, real_ip="198.51.100.1")
         node = "vless://abc@192.0.2.1:443?encryption=foo#original"
         runner = MagicMock(proxy_url="http://127.0.0.1:23456", port=23456)
-        with patch("proxy_sites.core.tester.MihomoRunner") as runner_cls, \
-                patch("proxy_sites.core.tester.aiohttp.ClientSession") as session_cls, \
-                patch("proxy_sites.core.tester.aiohttp.TCPConnector") as connector_cls, \
+        with patch("nodesieve.core.tester.MihomoRunner") as runner_cls, \
+                patch("nodesieve.core.tester.aiohttp.ClientSession") as session_cls, \
+                patch("nodesieve.core.tester.aiohttp.TCPConnector") as connector_cls, \
                 patch.object(tester, "_fetch_ip", new=AsyncMock(return_value=trace)), \
                 patch.object(tester, "fetch_location", new=AsyncMock(return_value=location)) as location_probe, \
-                patch("proxy_sites.core.tester.GeolocationService.get_country_name", new=AsyncMock(return_value="Germany")):
+                patch("nodesieve.core.tester.GeolocationService.get_country_name", new=AsyncMock(return_value="Germany")):
             runner_cls.return_value.__aenter__ = AsyncMock(return_value=runner)
             runner_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             session_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())

@@ -3,13 +3,13 @@
 import json
 import unittest
 import urllib.parse
-from proxy_sites.parsers.base import (
+from nodesieve.parsers.base import (
     extract_host_port,
     extract_node_protocol,
     format_descriptive_node_name,
     get_flag_emoji,
 )
-from proxy_sites.parsers.mihomo import node_url_to_mihomo_dict
+from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
 
 
 class TestParsers(unittest.TestCase):
