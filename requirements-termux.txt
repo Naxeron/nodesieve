@@ -1,0 +1,6 @@
+# What nodesieve needs in Termux on Android, all of which pip installs there by itself.
+# To run install-router from the phone, add Paramiko, whose cryptography, bcrypt and
+# PyNaCl come from Termux's packages: pkg install python-cryptography python-bcrypt
+# python-pynacl, then pip install paramiko.
+aiohttp
+PyYAML

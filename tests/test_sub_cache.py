@@ -187,8 +187,6 @@ class TestFetchAllWithLocalServer(unittest.IsolatedAsyncioTestCase):
         fetcher = NodeFetcher({
             "subscriptions": [self.flaky_url, self.steady_url],
             "use_mux": False,
-            "use_amnezia_wg": False,
-            "use_warp_scanner": False,
         })
         fetcher.cache_dir = self.cache_dir
         return await fetcher.fetch_all()

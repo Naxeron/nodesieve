@@ -1,23 +1,18 @@
-"""Adversarial stress-test suite for RouterClient and pusher.py.
+"""Adversarial tests for streaming files to the router over SSH, as install-router does.
 
-Evaluates failure modes, edge cases, payload boundaries, shell injections,
-and exit code propagation contracts.
+Evaluates failure modes, payload boundaries and shell injections.
 """
 
-import os
 import shlex
 import socket
 import subprocess
-import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 from nodesieve.router.client import RouterClient
-from nodesieve.router.pusher import push_to_router
 
 ROUTER_HOST = "192.168.1.1"
 ROUTER_SSH_PORT = 22
-ROUTER_REST_PORT = 9090
 
 
 def router_shell(router_tmp: str):
@@ -229,122 +224,6 @@ class TestStreamFileToRouterHardware(unittest.TestCase):
         self.assertNotEqual(code, 0, "Injected command must not execute")
         clean_cmd = "rm -f /tmp/test_inject.txt /tmp/adversarial_pwned"
         self.client.exec_command(clean_cmd)
-
-
-class TestPusherAdversarial(unittest.TestCase):
-    """Adversarial tests for pusher.py edge cases and failure modes."""
-
-    def test_push_missing_script_file_returns_false(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            missing = os.path.join(tmp_dir, "missing.sh")
-            with patch("nodesieve.router.pusher.ROUTER_SCRIPT_FILE", missing):
-                res = push_to_router()
-                self.assertFalse(res)
-
-    def test_push_unreadable_script_file_returns_false(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
-            f.write("#!/bin/sh\necho hi\n")
-            unreadable = f.name
-
-        os.chmod(unreadable, 000)
-        try:
-            with patch(
-                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", unreadable
-            ):
-                res = push_to_router()
-                self.assertFalse(res)
-        finally:
-            os.chmod(unreadable, 0o600)
-            os.unlink(unreadable)
-
-    def test_push_unreachable_router_returns_false(self):
-        unreachable = RouterClient(host="192.0.2.1")
-        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
-            f.write("#!/bin/sh\necho hi\n")
-            script_path = f.name
-
-        try:
-            with patch.object(
-                unreachable,
-                "_create_ssh",
-                side_effect=socket.timeout("SSH connect timeout"),
-            ):
-                with patch(
-                    "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_path
-                ):
-                    res = push_to_router(router_client=unreachable)
-                    self.assertFalse(res)
-        finally:
-            os.unlink(script_path)
-
-    def test_shell_compound_command_preserves_exit_code(self):
-        """Verifies that '; rc=$?; rm -f ...; exit $rc' preserves exit code."""
-        cmd = (
-            "/bin/sh /tmp/apply_to_router.sh; rc=$?; "
-            "rm -f /tmp/apply_to_router.sh; exit $rc"
-        )
-        with tempfile.TemporaryDirectory() as router_tmp:
-            remote_script = os.path.join(router_tmp, "apply_to_router.sh")
-            with open(remote_script, "w") as f:
-                f.write("#!/bin/sh\nexit 42\n")
-
-            returncode, _, _ = router_shell(router_tmp)(cmd)
-            self.assertEqual(
-                returncode,
-                42,
-                "Non-zero exit code must be preserved after rm -f",
-            )
-            self.assertFalse(os.path.exists(remote_script))
-
-    def test_push_to_router_detects_script_runtime_failure(self):
-        """Tests that push_to_router() returns False on script failure."""
-        mock_client = MagicMock()
-        mock_client.stream_file_to_router.return_value = True
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            script_path = os.path.join(tmp_dir, "apply_to_router.sh")
-            with open(script_path, "w") as f:
-                f.write("#!/bin/sh\necho 'Service failed' >&2\nexit 1\n")
-
-            router_tmp = os.path.join(tmp_dir, "router-tmp")
-            os.mkdir(router_tmp)
-            mock_client.exec_command.side_effect = router_shell(router_tmp)
-            with open(os.path.join(router_tmp, "apply_to_router.sh"), "w") as f:
-                f.write("#!/bin/sh\necho 'Service failed' >&2\nexit 1\n")
-
-            with patch(
-                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_path
-            ):
-                res = push_to_router(router_client=mock_client)
-                self.assertFalse(
-                    res,
-                    "push_to_router() must return False on non-zero exit code",
-                )
-
-    def test_push_to_router_detects_script_syntax_error(self):
-        """Tests that push_to_router() returns False on script syntax error."""
-        mock_client = MagicMock()
-        mock_client.stream_file_to_router.return_value = True
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            script_path = os.path.join(tmp_dir, "apply_to_router.sh")
-            with open(script_path, "w") as f:
-                f.write("#!/bin/sh\nif [ ; then fi\n")
-
-            router_tmp = os.path.join(tmp_dir, "router-tmp")
-            os.mkdir(router_tmp)
-            mock_client.exec_command.side_effect = router_shell(router_tmp)
-            with open(os.path.join(router_tmp, "apply_to_router.sh"), "w") as f:
-                f.write("#!/bin/sh\nif [ ; then fi\n")
-
-            with patch(
-                "nodesieve.router.pusher.ROUTER_SCRIPT_FILE", script_path
-            ):
-                res = push_to_router(router_client=mock_client)
-                self.assertFalse(
-                    res,
-                    "push_to_router() must return False on syntax error",
-                )
 
 
 if __name__ == "__main__":

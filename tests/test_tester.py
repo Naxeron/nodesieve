@@ -30,10 +30,6 @@ class TestNodeTester(unittest.TestCase):
 
     def test_tcp_ping_invalid_nodes(self):
         async def run():
-            # Awg config returns directly
-            res_awg = await self.tester.async_check_tcp_node("awg_conf:US.conf#Tag")
-            self.assertEqual(res_awg, "awg_conf:US.conf#Tag")
-
             # Filtered tags
             res_auto = await self.tester.async_check_tcp_node("vless://uuid@1.2.3.4:443#Авто_Node")
             self.assertIsNone(res_auto)

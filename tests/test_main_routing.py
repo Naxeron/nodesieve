@@ -20,7 +20,7 @@ def location(v4=None, v6=None):
     for family in families.values():
         for code, number in family["counts"].items():
             counts[code] = counts.get(code, 0) + number
-    return {**consensus(counts), "source": "ipregion", "status": "ok",
+    return {**consensus(counts), "source": "geoip", "status": "ok",
             "families": families, "tested_families": list(families)}
 
 
@@ -120,21 +120,12 @@ def test_renamed_nodes_recover_original_evidence_and_duplicate_uris_are_removed(
     assert observations[original]["location"]["counts"]["DE"] == 3
 
 
-def test_settings_saved_by_earlier_versions_are_migrated_or_refused():
-    legacy = {"enabled": True, "target": "forkozz", "main": {"mode": "location", "min_votes": 4}, "services": {
-        "twitter": {"mode": "country", "countries": ["US"], "country_source": "edge"},
-        "discord": {"mode": "latency"}, "no-longer-validated": "anything",
-    }}
-    saved = deepcopy(legacy)
-    normalized = normalize_routing(legacy)
-    assert legacy == saved
-    assert normalized == {**deepcopy(DEFAULT_ROUTING), "enabled": True,
-                          "main": {**DEFAULT_ROUTING["main"], "min_votes": 4}}
-    assert normalize_routing(normalized) == normalized
-    # "preserve" asked for main to be left alone: never turn that into a managed pool.
-    for enabled in (True, False):
-        with pytest.raises(ValueError, match="preserve"):
-            normalize_routing({"enabled": enabled, "main": {"mode": "preserve"}})
+@pytest.mark.parametrize("routing", [
+    {"target": "forkozz"}, {"services": {"twitter": {"mode": "country"}}}, {"main": {"mode": "location"}},
+])
+def test_settings_of_earlier_versions_are_refused(routing):
+    with pytest.raises(ValueError):
+        normalize_routing(routing)
 
 
 @pytest.mark.parametrize("routing", [

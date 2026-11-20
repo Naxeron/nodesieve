@@ -5,7 +5,7 @@ import copy
 import os
 import re
 from typing import Any, Dict, Union
-from nodesieve.constants import CONFIG_FILE, DEFAULT_CONFIG, LEGACY_CONFIG_FILE
+from nodesieve.constants import CONFIG_FILE, DEFAULT_CONFIG
 from nodesieve.logging import log
 
 
@@ -14,30 +14,12 @@ class ConfigManager:
 
     @classmethod
     def default_path(cls, project_root: Union[str, os.PathLike]) -> str:
-        """The settings file in the project directory.
-
-        Settings saved before the project was renamed are in LEGACY_CONFIG_FILE. While
-        only that file exists, it is renamed to CONFIG_FILE, so subscriptions and router
-        credentials carry over; if it cannot be renamed, it is used under its old name.
-        """
-        path = os.path.join(project_root, CONFIG_FILE)
-        legacy = os.path.join(project_root, LEGACY_CONFIG_FILE)
-        if not os.path.exists(legacy):
-            return path
-        if os.path.exists(path):
-            log.warning(f"[!] Settings are read from {CONFIG_FILE}; {LEGACY_CONFIG_FILE} is no longer used and can be deleted.")
-            return path
-        try:
-            os.rename(legacy, path)
-        except OSError as exc:
-            log.warning(f"[!] Could not rename {LEGACY_CONFIG_FILE} to {CONFIG_FILE} ({exc}); using the old file.")
-            return legacy
-        log.info(f"[*] Renamed {LEGACY_CONFIG_FILE} to {CONFIG_FILE}.")
-        return path
+        """The settings file in the project directory."""
+        return os.path.join(project_root, CONFIG_FILE)
 
     @classmethod
     def load(cls, path: str = CONFIG_FILE, strict: bool = False) -> Dict[str, Any]:
-        """Loads configuration from disk, applying defaults and normalizing legacy formats.
+        """Loads configuration from disk, filling in defaults and fixing malformed values.
 
         A file that can't be read is replaced by the defaults, with a warning. With
         strict, it raises ValueError instead: before saving, so that the defaults
@@ -63,21 +45,14 @@ class ConfigManager:
                     "Using default values."
                 )
 
-        # Normalize legacy types/values
         cls._normalize_config(config)
         return config
 
     @classmethod
     def _normalize_config(cls, config: Dict[str, Any]) -> None:
-        """Normalizes config entries for backwards-compatibility."""
+        """Replaces malformed values with their defaults."""
         from nodesieve.routing import normalize_routing
         config["routing"] = normalize_routing(config.get("routing"))
-        # Convert legacy bool goida_mode to proper string
-        goida_val = config.get("use_goida_proxies")
-        if goida_val is True:
-            config["use_goida_proxies"] = "all"
-        elif goida_val is False:
-            config["use_goida_proxies"] = "off"
 
         # Ensure subscriptions is a list
         if not isinstance(config.get("subscriptions"), list):
@@ -108,8 +83,6 @@ class ConfigManager:
 
         # Ensure router and feed ports are valid integers in port range
         for port_field, default_port in [
-            ("router_api_port", 9090),
-            ("router_proxy_port", 7890),
             ("router_ssh_port", 22),
             ("feed_port", DEFAULT_CONFIG["feed_port"]),
         ]:
@@ -120,7 +93,7 @@ class ConfigManager:
                 config[port_field] = default_port
 
         # Subscription feed
-        for text_field in ("feed_dir", "feed_token"):
+        for text_field in ("feed_dir", "feed_token", "feed_command"):
             value = config.get(text_field)
             config[text_field] = value.strip() if isinstance(value, str) else ""
         host = config.get("feed_host")

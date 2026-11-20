@@ -25,9 +25,6 @@ def normalize_routing(value=None):
         value = {}
     if not isinstance(value, dict):
         raise ValueError("routing must be an object")
-    # Configurations saved by earlier versions carry per-service preferences.
-    # Service routing no longer exists, so those are dropped rather than refused.
-    value = {k: v for k, v in value.items() if k != "services"}
     unknown = set(value) - set(DEFAULT_ROUTING)
     if unknown:
         raise ValueError(f"Unknown routing setting: {', '.join(sorted(map(str, unknown)))}")
@@ -35,25 +32,11 @@ def normalize_routing(value=None):
     result.update({k: v for k, v in value.items() if k != "main"})
     if not isinstance(result["enabled"], bool):
         raise ValueError("routing.enabled must be true or false")
-    # "forkozz" was the only value earlier versions ever saved here, chosen or not.
-    # That exporter was replaced by Steer, which refuses routers it does not manage.
-    if result["target"] == "forkozz":
-        result["target"] = "steer"
     if result["target"] != "steer" or result["default_policy"] != "preserve":
         raise ValueError("Routing supports target 'steer' and default_policy 'preserve' only")
     main = value.get("main", {})
     if not isinstance(main, dict):
         raise ValueError("routing.main must be an object")
-    main = dict(main)
-    # The main pool is now the only thing routing manages, so the old mode
-    # switch is gone. 'location' was its managed value; 'preserve' asked for the
-    # pool to be left alone and must not silently become managed.
-    mode = main.pop("mode", "location")
-    if not isinstance(mode, str) or mode not in {"location", "preserve"}:
-        raise ValueError("routing.main.mode is no longer a setting; remove it")
-    if mode == "preserve":
-        raise ValueError("routing.main.mode 'preserve' is no longer supported: routing only manages the main pool. "
-                         "Remove main.mode, and keep routing disabled to leave the main proxy untouched")
     if set(main) - set(DEFAULT_ROUTING["main"]):
         raise ValueError("routing.main must contain only excluded_countries, allowed_countries, min_agreement and min_votes")
     result["main"].update(copy.deepcopy(main))
@@ -111,7 +94,8 @@ def _consensus_failure(policy, result):
 
 def main_policy_failure(policy, evidence):
     """Require usable GeoIP consensus in every observed/required IP family."""
-    if not isinstance(evidence, dict) or evidence.get("source") != "ipregion":
+    # "geoip": evidence from nodesieve.location.
+    if not isinstance(evidence, dict) or evidence.get("source") != "geoip":
         return "Location evidence missing"
     if evidence.get("ip_leak"):
         return "Location probe detected an IP leak"

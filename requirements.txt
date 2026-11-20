@@ -1,4 +1,6 @@
 aiohttp
-psutil
+# Linux and Android report free memory in /proc/meminfo; psutil reads it elsewhere.
+psutil; platform_system != "Linux" and platform_system != "Android"
+# SSH to the router, for install-router.
 paramiko
 PyYAML

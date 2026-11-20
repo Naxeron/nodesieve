@@ -9,7 +9,7 @@ from nodesieve.logging import get_free_memory_mb
 RESERVED_MB = 500
 # One Mihomo instance holds about 20 MB of memory of its own (heap and stacks), whether it
 # serves 1 node or 128; each node adds about 0.5 MB while its IP check runs, 1.1 MB under
-# ipregion's 16 parallel requests (Mihomo alpha-100ff73, 2026-11-20). The budget per node
+# the location probe's 16 parallel requests (Mihomo alpha-100ff73, 2026-11-20). The budget per node
 # checked at once, mem_per_worker, covers that share and the check's Python side.
 MIHOMO_INSTANCE_MB = 24.0
 DEFAULT_MEM_PER_WORKER_MB = 8.0

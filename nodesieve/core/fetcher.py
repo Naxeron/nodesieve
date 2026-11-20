@@ -18,9 +18,7 @@ import aiohttp
 
 from nodesieve.constants import PROJECT_ROOT, SUB_CACHE_DIR
 from nodesieve.logging import ErrorTracker, log
-from nodesieve.parsers.awg import parse_amnezia_conf
 from nodesieve.parsers.base import extract_host_port
-from nodesieve.warp import WarpScanner
 
 
 def _format_age(seconds: float) -> str:
@@ -36,7 +34,7 @@ def _format_age(seconds: float) -> str:
 
 
 class NodeFetcher:
-    """Retrieves VPN proxy nodes from remote URLs and local configuration sources."""
+    """Retrieves VPN proxy nodes from the configured subscription URLs."""
 
     # Holds the last good payload of each subscription; tests point it at a temporary directory.
     cache_dir = os.path.join(PROJECT_ROOT, SUB_CACHE_DIR)
@@ -57,7 +55,7 @@ class NodeFetcher:
         return ports
 
     async def fetch_all(self) -> Tuple[List[str], Dict[str, str]]:
-        """Downloads all configured subscriptions concurrently, merges local AWG/WARP nodes, and deduplicates."""
+        """Downloads all configured subscriptions concurrently and deduplicates their nodes."""
         raw_subs = self.config.get("subscriptions", [])
         if isinstance(raw_subs, list):
             subs = [s.strip() for s in raw_subs if isinstance(s, str) and s.strip()]
@@ -101,41 +99,8 @@ class NodeFetcher:
                 seen_cores.add(core)
                 unique_nodes.append(node)
 
-        # Include AmneziaWG .conf files from project directory for testing
-        use_awg = self.config.get("use_amnezia_wg", True)
-        conf_files = []
-        if use_awg:
-            awg_conf_setting = self.config.get("amnezia_wg_conf", "US.conf")
-            if os.path.exists(os.path.join(PROJECT_ROOT, awg_conf_setting)) or os.path.exists(awg_conf_setting):
-                conf_files.append(awg_conf_setting)
-            for f in os.listdir(PROJECT_ROOT):
-                if f.endswith(".conf") and f not in conf_files:
-                    conf_files.append(f)
-
-        for cf in conf_files:
-            cpath = os.path.join(PROJECT_ROOT, cf) if not os.path.isabs(cf) else cf
-            if not os.path.exists(cpath) and os.path.exists(cf):
-                cpath = cf
-            if os.path.exists(cpath):
-                parsed = parse_amnezia_conf(cpath)
-                if parsed:
-                    proxy_name = os.path.splitext(os.path.basename(cf))[0]
-                    awg_node = f"awg_conf:{cf}#AWG_{proxy_name}"
-                    if awg_node not in unique_nodes:
-                        unique_nodes.append(awg_node)
-                        log.info(f"[*] Included AmneziaWG config for testing: {cf}")
-
-        # Cloudflare WARP endpoints
-        if self.config.get("use_warp_scanner", False):
-            if WarpScanner.has_identity(self.config):
-                warp_nodes = WarpScanner.generate_endpoints(5)
-                unique_nodes.extend(warp_nodes)
-                log.info(f"[*] Generated {len(warp_nodes)} WARP endpoints for testing.")
-            else:
-                log.warning("[!] WARP scanner is on but warp_private_key is not set. Skipping WARP endpoints.")
-
         if not unique_nodes:
-            log.info("[-] No candidate nodes found from configured subscriptions or local files.")
+            log.info("[-] No candidate nodes found in the configured subscriptions.")
 
         return unique_nodes, node_to_url
 

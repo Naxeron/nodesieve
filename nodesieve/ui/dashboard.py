@@ -1,34 +1,23 @@
-"""VPN dashboard coordinating fresh on-demand testing, router-side verification, and automated router deployment."""
+"""Coordinates a scan: fetch the subscriptions, check and rank the nodes, publish them to the feed."""
 
 import asyncio
-import hashlib
-import json
-import os
 import re
 import time
-from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 import aiohttp
 
 from nodesieve.config import ConfigManager
-from nodesieve.constants import (
-    PROJECT_ROOT,
-    ROUTER_SCRIPT_FILE,
-)
 from nodesieve.core.fetcher import NodeFetcher
 from nodesieve.core.limits import ResourceLimits
 from nodesieve.core.mihomo import MihomoManager, NodeEndpoint, run_in_batches
 from nodesieve.core.tester import NodeTester
-from nodesieve.feed import feed_status, write_feed
+from nodesieve.feed import feed_status, run_feed_command, write_feed
 from nodesieve.logging import ErrorTracker, log, update_progress
-from nodesieve.router.client import RouterClient
-from nodesieve.router.pusher import push_to_router
-from nodesieve.router.script_generator import generate_router_script
 from nodesieve.routing import normalize_routing, select_main_pool
 
 
 class VPNDashboard:
-    """High-level application coordinator managing fresh on-demand evaluation and deployment."""
+    """Runs a scan of the configured subscriptions and publishes the result to the feed."""
 
     def __init__(self, config: Optional[dict] = None):
         self.config = config if config is not None else ConfigManager.load()
@@ -84,7 +73,7 @@ class VPNDashboard:
         return None
 
     async def fetch_and_verify_candidates_async(self) -> Tuple[List[Any], Optional[NodeTester]]:
-        """Executes fresh node fetching, Phase 0 TCP filtering, Phase 1 local IP checks, and Stage 2 router verification."""
+        """Fetches the subscriptions, then runs Phase 0 (TCP reachability) and Phase 1 (exit IP and location checks)."""
         ErrorTracker.reset()
 
         # Scale file descriptors BEFORE any connections are made
@@ -169,26 +158,6 @@ class VPNDashboard:
                 + ("; the rest are used without it." if tester.mux_supported < tester.mux_offered else ".")
             )
 
-        # Steer runs its own core; the legacy verifier changes Mihomo's
-        # provider and cannot verify this target. Keep these results explicitly local.
-        if self.config.get("routing", {}).get("enabled", False):
-            log.info("[*] Steer: IP checks measured on this computer; router-side validation is not available.")
-        elif self.config.get("enable_router_validation", True):
-            try:
-                from nodesieve.core.router_validator import RouterValidator
-                validator = RouterValidator(config=self.config)
-                verified_nodes = await validator.verify_nodes_on_router(supported_nodes)
-                if verified_nodes:
-                    supported_nodes = verified_nodes
-                else:
-                    log.warning("[-] No candidate nodes passed Stage 2 router validation.")
-                    return [], tester
-            except Exception as e:
-                log.error(f"[-] Stage 2 router validation encountered an error: {e}")
-                log.warning("[!] Preserving Stage 1 candidates in fallback mode.")
-        else:
-            log.info("[*] Router validation disabled in configuration. Skipping Stage 2.")
-
         return supported_nodes, tester
 
     async def run_speedtest_nodes_async(
@@ -255,91 +224,38 @@ class VPNDashboard:
 
         return speed_tested_nodes
 
-    async def run_pipeline_async(
-        self,
-        check_only: bool = False,
-        deploy_only: bool = False,
-        dry_run: bool = False,
-    ) -> bool:
-        """Executes the streamlined single-command pipeline: fetch, verify, speedtest, and deploy."""
+    async def run_pipeline_async(self, dry_run: bool = False) -> bool:
+        """Scan: fetch, check and rank the nodes, then publish them to the subscription feed.
+
+        A Steer scan ranks by location (run_routing_pipeline_async); any other by exit
+        country and speed, keeping the 30 fastest. With dry_run, feed_command doesn't run.
+        """
         if self.config.get("routing", {}).get("enabled", False):
-            return await self.run_routing_pipeline_async(check_only, deploy_only, dry_run)
-        script_path = os.path.join(PROJECT_ROOT, ROUTER_SCRIPT_FILE)
+            return await self.run_routing_pipeline_async(dry_run)
 
-        # 1. Deploy-only mode
-        if deploy_only:
-            log.info("[*] Deploy-only phase requested.")
-            if not os.path.exists(script_path):
-                log.error(f"[-] Cannot deploy: {ROUTER_SCRIPT_FILE} not found. Run check first.")
-                return False
-            if dry_run:
-                log.info("[*] [DRY RUN] Existing configuration syntax checked. Skipping remote deployment.")
-                return True
-            log.info("[*] Deploying existing configuration to router...")
-            return self.push_to_router()
-
-        # 2. Fresh On-Demand Evaluation & Router-Side Verification
         candidates, tester = await self.fetch_and_verify_candidates_async()
         if not candidates:
             log.warning("[-] Pipeline aborted: No surviving verified nodes.")
             self.report_kept_feed()
             return False
 
-        # 3. Phase 2 Speedtesting & Ranking
         speed_tested = await self.run_speedtest_nodes_async(candidates, tester)
-
         final_nodes: List[str] = []
         if speed_tested:
-            for n, speed_bps, loc_score in speed_tested[:30]:
-                if speed_bps > 0:
-                    final_nodes.append(n)
+            final_nodes = [n for n, speed_bps, _ in speed_tested[:30] if speed_bps > 0]
             if not final_nodes:
                 final_nodes = [n for n, _, _ in speed_tested[:30]]
         else:
             for cand in candidates[:30]:
-                node_str = cand[0] if isinstance(cand, (tuple, list)) and len(cand) > 0 else str(cand)
-                final_nodes.append(node_str)
+                final_nodes.append(cand[0] if isinstance(cand, (tuple, list)) and len(cand) > 0 else str(cand))
+        log.info(f"[+] Scan complete: {len(final_nodes)} top verified nodes.")
+        return self.publish_feed(final_nodes, run_command=not dry_run)
 
-        # 4. Generate router deployment script & configurations
-        generate_router_script(final_nodes, self.config)
-        log.info(f"[*] Generated OpenWrt deployment script '{ROUTER_SCRIPT_FILE}' with {len(final_nodes)} top verified nodes.")
-        feed_ok = self.publish_feed(final_nodes)
-
-        # 5. Check-only or dry-run completion
-        if check_only:
-            log.info(f"[+] Check-only complete: {len(final_nodes)} top verified nodes formatted for deployment.")
-            return feed_ok
-
-        if dry_run:
-            log.info(f"[+] [DRY RUN] Staged and verified {len(final_nodes)} nodes. Skipping remote router deployment.")
-            return feed_ok
-
-        # 6. Automated Deployment & Rollback Safety
-        log.info("[*] Automatically deploying verified configuration to router via SSH...")
-        deploy_ok = self.push_to_router()
-        if deploy_ok:
-            log.info("[+] Deployment to router completed successfully.")
-        else:
-            log.error("[-] Deployment to router failed. Router was automatically rolled back to working state.")
-        return deploy_ok and feed_ok
-
-    async def run_routing_pipeline_async(self, check_only=False, deploy_only=False, dry_run=False) -> bool:
-        """Export the location-ranked main server list for Steer without touching the Mihomo verifier."""
-        from nodesieve.router.steer import SCRIPT_NAME, SERVERS_NAME, output_directory, write_steer_artifacts
+    async def run_routing_pipeline_async(self, dry_run: bool = False) -> bool:
+        """Rank the Steer main pool by location, write its report, and publish the pool to the feed."""
+        from nodesieve.router.steer import write_routing_report
 
         self.config["routing"] = normalize_routing(self.config.get("routing"))
-        if deploy_only:
-            return self.deploy_steer(dry_run)
-
-        # An interrupted/failed new scan must not leave an older script deployable.
-        directory = output_directory(self.config)
-        try:
-            for filename in (SCRIPT_NAME, SERVERS_NAME):
-                (directory / filename).unlink(missing_ok=True)
-        except OSError as exc:
-            log.error(f"[-] Cannot invalidate previous Steer artifacts: {exc}")
-            return False
-
         candidates, tester = await self.fetch_and_verify_candidates_async()
         metadata = tester.node_metadata if tester else {}
         # Include nodes that failed the location policy in the report as exclusions.
@@ -348,34 +264,36 @@ class VPNDashboard:
         ]
         pool = select_main_pool(evaluated, metadata, self.config["routing"])
         try:
-            artifacts = write_steer_artifacts(pool, self.config)
+            report = write_routing_report(pool, self.config)
         except (OSError, ValueError) as exc:
-            log.error(f"[-] Cannot generate the Steer server list: {exc}")
+            log.error(f"[-] Cannot write the routing report: {exc}")
             return False
         log.info(f"[*] Main pool: {len(pool['eligible'])} qualifying proxies.")
-        log.info(f"[*] Routing report: {artifacts['report_path']}")
-        if not artifacts["ready"]:
-            log.error("[-] Steer export unresolved: no proxy qualifies for the main pool. See the report; change preferences or check new proxies.")
+        log.info(f"[*] Routing report: {report['report_path']}")
+        if not report["ready"]:
+            log.error("[-] No proxy qualifies for the main pool. See the report; change preferences or check new proxies.")
             self.report_kept_feed()
             return False
-        log.info(f"[+] Steer server list generated: {artifacts['servers_path']}")
-        feed_ok = self.publish_feed(artifacts["servers"])
-        if check_only or dry_run:
-            return feed_ok
-        return self.deploy_steer() and feed_ok
+        return self.publish_feed(report["servers"], run_command=not dry_run)
 
-    def publish_feed(self, nodes: List[str]) -> bool:
-        """Write the scan's nodes to the subscription feed; False only when it could not be written."""
+    def publish_feed(self, nodes: List[str], run_command: bool = True) -> bool:
+        """Write the scan's nodes to the subscription feed; False only when it could not be written.
+
+        A feed that changed is followed by the feed_command setting, unless run_command is
+        False (a dry run). Its failure is reported but leaves the scan's result alone: the
+        feed is in place, and apps fetch it on their own schedule as well.
+        """
         try:
             result = write_feed(nodes, self.config)
         except (OSError, ValueError, TypeError) as exc:
             log.error(f"[-] Cannot write the subscription feed: {exc}")
             return False
         if result["left_out"]:
-            log.info(f"[*] Left out of the subscription feed: {result['left_out']} WARP, AmneziaWG or "
-                     "other nodes without a share link.")
+            log.info(f"[*] Left out of the subscription feed: {result['left_out']} nodes without a share link.")
         if result["written"]:
             log.info(f"[+] Subscription feed updated with {result['count']} nodes: {result['directory']}")
+            if run_command:
+                run_feed_command(self.config)
         else:
             self.report_kept_feed()
         return True
@@ -386,96 +304,3 @@ class VPNDashboard:
         if status:
             log.warning(f"[!] The subscription feed is unchanged: it keeps the {status['count']} nodes "
                         f"of the scan from {status['written_at']:%Y-%m-%d %H:%M}.")
-
-    def deploy_steer(self, dry_run=False) -> bool:
-        """Deploy a fresh reviewed artifact through Zapret Manager's own Steer backend."""
-        from nodesieve.router.steer import REPORT_NAME, SCRIPT_NAME, output_directory, routing_fingerprint
-
-        directory = output_directory(self.config)
-        try:
-            report = json.loads((directory / REPORT_NAME).read_text(encoding="utf-8"))
-            script = (directory / SCRIPT_NAME).read_text(encoding="utf-8")
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(report["created_at"])).total_seconds()
-            if not report.get("ready") or not 0 <= age <= 86400:
-                raise ValueError("Routing results are unresolved or older than 24 hours; run check again")
-            if report.get("config_fingerprint") != routing_fingerprint(self.config):
-                raise ValueError("Routing preferences or router changed; run check again")
-            if report.get("script_sha256") != hashlib.sha256(script.encode("utf-8")).hexdigest():
-                raise ValueError("Deployment script differs from the checked artifact; run check again")
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            log.error(f"[-] Cannot deploy to Steer: {exc}")
-            return False
-        if dry_run:
-            log.info("[+] Steer artifact is fresh and matches current preferences. Dry run: no router changes.")
-            return True
-        client = RouterClient(
-            host=self.config.get("router_host", "192.168.1.1"),
-            ssh_port=self.config.get("router_ssh_port", 22),
-            ssh_user=self.config.get("router_ssh_user", "root"),
-            ssh_pass=self.config.get("router_ssh_pass", ""),
-            ssh_key_path=self.config.get("router_ssh_key_path"),
-        )
-        # SSH channel stdin avoids leaving a second copy of proxy credentials in /tmp.
-        # The panel may install core plugins first, and a failed apply is followed by a restore.
-        code, out, err = client.exec_command("/bin/sh -s", timeout=900, stdin_data=script)
-        lines = (err + "\n" + out).splitlines()
-        for line in lines:
-            if line.startswith("PSC_NOTE: "):
-                log.warning("[!] " + line.removeprefix("PSC_NOTE: ")[:300])
-        # Exit status alone is not proof: a script that never ran to its end also exits 0.
-        confirmed = [line.removeprefix("PSC_OK: ")[:300] for line in lines if line.startswith("PSC_OK: ")]
-        if code != 0 or not confirmed:
-            for line in lines:
-                if line.startswith("PSC_ERROR: "):
-                    log.error("[-] " + line.removeprefix("PSC_ERROR: ")[:300])
-                elif line.startswith("PSC_LOG: "):
-                    log.error("    " + line.removeprefix("PSC_LOG: ")[:300])
-            if code == 0:
-                log.error("[-] The router did not confirm the change.")
-            log.error("[-] Steer deployment failed; check Steer in the Zapret Manager panel.")
-            return False
-        log.info("[+] " + confirmed[-1])
-        return True
-
-    async def run_checks_async(self) -> bool:
-        """Runs the complete verification pipeline in check-only mode without deploying to router."""
-        return await self.run_pipeline_async(check_only=True)
-
-    async def run_speedtest_async(self, candidate_nodes: Optional[List[Any]] = None) -> bool:
-        """Runs speedtests on candidate nodes and regenerates router configuration."""
-        nodes_to_test = candidate_nodes
-        if not nodes_to_test:
-            # Re-fetch fresh candidates on-demand
-            candidates, tester = await self.fetch_and_verify_candidates_async()
-            nodes_to_test = candidates
-        else:
-            tester = None
-
-        if not nodes_to_test:
-            log.info("[-] No candidates available to speedtest.")
-            return False
-
-        speed_tested = await self.run_speedtest_nodes_async(nodes_to_test, tester)
-        if not speed_tested:
-            log.info("[-] All nodes failed the speedtest.")
-            return False
-
-        final_nodes = [n for n, speed_bps, _ in speed_tested[:30] if speed_bps > 0]
-        if not final_nodes:
-            final_nodes = [n for n, _, _ in speed_tested[:30]]
-
-        generate_router_script(final_nodes, self.config)
-        log.info(f"[*] Regenerated {ROUTER_SCRIPT_FILE} with top {len(final_nodes)} nodes.")
-        return True
-
-    def push_to_router(self) -> bool:
-        """Deploys apply_to_router.sh to the router via SSH using configured parameters."""
-        client = RouterClient(
-            host=self.config.get("router_host", "192.168.1.1"),
-            api_port=self.config.get("router_api_port", 9090),
-            proxy_port=self.config.get("router_proxy_port", 7890),
-            ssh_port=self.config.get("router_ssh_port", 22),
-            ssh_user=self.config.get("router_ssh_user", "root"),
-            ssh_pass=self.config.get("router_ssh_pass", ""),
-        )
-        return push_to_router(router_client=client, config=self.config)

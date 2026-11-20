@@ -24,20 +24,12 @@ class TestParsers(unittest.TestCase):
         self.assertEqual(extract_node_protocol("trojan://pass@host:443#tag"), "TROJAN")
         self.assertEqual(extract_node_protocol("ss://pass@host:443#tag"), "SS")
         self.assertEqual(extract_node_protocol("shadowsocks://pass@host:443#tag"), "SS")
-        self.assertEqual(extract_node_protocol("warp://1.1.1.1:2408#tag"), "WARP")
-        self.assertEqual(extract_node_protocol("awg_conf:US.conf#tag"), "AWG")
 
     def test_extract_host_port_vless(self):
         node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.95:443?path=%2F&security=none#tag"
         host, port = extract_host_port(node)
         self.assertEqual(host, "198.51.100.95")
         self.assertEqual(port, 443)
-
-    def test_extract_host_port_warp(self):
-        node = "warp://162.159.192.1:2408#WARP"
-        host, port = extract_host_port(node)
-        self.assertEqual(host, "162.159.192.1")
-        self.assertEqual(port, 2408)
 
     def test_extract_host_port_ss_b64(self):
         # ss://YWVzLTEyOC1nY206cGFzc3dvcmQ=@1.2.3.4:8388#tag
@@ -183,15 +175,9 @@ class TestParsers(unittest.TestCase):
         )
         self.assertEqual(name, "[TROJAN: Tag] \U0001F1E9\U0001F1EA Germany | LOC: 85% | 192.0.2.1 | 2001:db8::1")
         unknown = format_descriptive_node_name(
-            node="awg_conf:US.conf#AWG_US", country_code=None, country_name=None, ip_str="",
+            node="trojan://pass@192.0.2.9:443#Tag", country_code=None, country_name=None, ip_str="",
         )
-        self.assertEqual(unknown, "[AWG: US.conf] \U0001F310 Unknown")
-
-    def test_extract_host_port_warp_ipv6(self):
-        node = "warp://[2606:4700:4700::1111]:2408#WARP"
-        host, port = extract_host_port(node)
-        self.assertEqual(host, "2606:4700:4700::1111")
-        self.assertEqual(port, 2408)
+        self.assertEqual(unknown, "[TROJAN: Tag] \U0001F310 Unknown")
 
     def test_format_descriptive_node_name_preserves_inner_tag(self):
         # First round
@@ -215,17 +201,17 @@ class TestParsers(unittest.TestCase):
         self.assertIn("[VLESS: Latvia_Server]", name2)
         self.assertIn("⚡ 20.0 MB/s", name2)
 
-    def test_format_descriptive_node_name_warp_and_protocols_idempotency(self):
-        """format_descriptive_node_name prevents nested protocol tags for WARP and other schemes."""
-        warp_node = "warp://127.0.0.1:443#[WARP: Warp-US] \U0001F1FA\U0001F1F8 United-States | 1.1.1.1"
+    def test_format_descriptive_node_name_protocol_tag_idempotency(self):
+        """format_descriptive_node_name does not nest protocol tags when a node is renamed again."""
+        renamed = "trojan://pass@127.0.0.1:443#[TROJAN: Tr-US] \U0001F1FA\U0001F1F8 United-States | 1.1.1.1"
         formatted = format_descriptive_node_name(
-            node=warp_node,
+            node=renamed,
             country_code="US",
             country_name="United States",
             ip_str="1.1.1.1",
         )
-        self.assertNotIn("[WARP: [WARP:", formatted)
-        self.assertTrue(formatted.startswith("[WARP: Warp-US]"))
+        self.assertNotIn("[TROJAN: [TROJAN:", formatted)
+        self.assertTrue(formatted.startswith("[TROJAN: Tr-US]"))
 
     def test_format_descriptive_node_name_speed_prefix_and_duplicate_country_cleaning(self):
         """Extracts the innermost protocol tag behind a speed tag and strips duplicate country names."""

@@ -2,10 +2,14 @@
 
 ## ipregion
 
-`ipregion.sh` is an unmodified copy of
-[ipregion](https://github.com/vernette/ipregion) by vernette, taken from commit
+The location checks in `nodesieve/location.py` ask the GeoIP providers of the "geoip"
+group of [ipregion](https://github.com/vernette/ipregion) by vernette, the way ipregion
+asks them: the providers, their addresses and request headers, the demo keys and token
+flows, how the exit address is found, and which answers count. They are adapted from
+ipregion's commit
 [`d431acf`](https://github.com/vernette/ipregion/commit/d431acfdb8146a0d970ff0bb1c23db965b4e4495)
-(2026-11-16). It is distributed under the MIT License:
+(2026-11-16), which nodesieve ran unmodified as `ipregion.sh` before. ipregion is
+distributed under the MIT License:
 
 ```text
 MIT License
