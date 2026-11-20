@@ -258,6 +258,10 @@ python -m pytest --ignore=tests/test_live_router_smoke.py --deselect tests/test_
 The hardware tests log in with the SSH agent or default key files. The smoke test
 uses a password instead when `ROUTER_SSH_PASS` is set.
 
+Each test gets an empty temporary project directory, so a test run doesn't write
+to your `apply_to_router.sh`, `crashed_nodes.txt` or `sub_cache/`. If a test changes
+a file in the project directory anyway, the run fails and lists the file.
+
 ## Updating dependencies
 
 - **ipregion.sh:** `python update_ipregion.py` replaces the bundled script with the

@@ -135,3 +135,14 @@ def get_ephemeral_port() -> int:
     return port
 ```
 All TCP connections wrap `writer.wait_closed()` with `asyncio.wait_for(..., timeout=0.2)` to eliminate hanging sockets and descriptor leaks across test runs.
+
+---
+
+## 6. Project Directory Isolation
+
+The checker writes its output into the project directory (`apply_to_router.sh`, which
+`deploy` pushes to the router unchanged, `crashed_nodes.txt`, `sub_cache/`). `tests/conftest.py`
+points `PROJECT_ROOT` in every module that builds such paths at an empty temporary
+directory for each test, and fails the session, listing the files, if any file in the real
+project directory changed during the run. A module that starts building paths from
+`PROJECT_ROOT` belongs in `_PROJECT_ROOT_USERS` there.

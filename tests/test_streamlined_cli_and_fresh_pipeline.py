@@ -11,11 +11,12 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from proxy_sites.config import ConfigManager
-from proxy_sites.constants import CONFIG_FILE, PROJECT_ROOT
+from proxy_sites.constants import CONFIG_FILE
 from proxy_sites.core.fetcher import NodeFetcher
 from proxy_sites.core.router_validator import RouterValidator
 from proxy_sites.router.script_generator import generate_router_script
 from proxy_sites.ui.cli import build_parser, main
+import proxy_sites.ui.dashboard as dashboard_module
 from proxy_sites.ui.dashboard import VPNDashboard
 
 
@@ -415,13 +416,10 @@ class TestStockpileElimination(unittest.TestCase):
 
     def test_pipeline_does_not_create_or_merge_stockpile(self):
         """Running VPNDashboard does not create or read gemini_subscription.txt."""
-        stockpile_path = os.path.join(PROJECT_ROOT, "gemini_subscription.txt")
-        tmp_stockpile = os.path.join(PROJECT_ROOT, "gemini_subscription_tmp.txt")
-
-        # Ensure neither exists before test
-        for p in [stockpile_path, tmp_stockpile]:
-            if os.path.exists(p):
-                os.remove(p)
+        # The project directory the pipeline writes to: an empty temporary one (tests/conftest.py).
+        project_dir = dashboard_module.PROJECT_ROOT
+        stockpile_path = os.path.join(project_dir, "gemini_subscription.txt")
+        tmp_stockpile = os.path.join(project_dir, "gemini_subscription_tmp.txt")
 
         dash = VPNDashboard(config={
             "subscriptions": ["https://example.com/mock_sub"],
@@ -444,7 +442,8 @@ class TestStockpileElimination(unittest.TestCase):
         success = asyncio.run(dash.run_pipeline_async(check_only=True))
         self.assertTrue(success)
 
-        # Neither stockpile file must be created on disk!
+        # The pipeline wrote its router script, and neither stockpile file, to the project directory.
+        self.assertTrue(os.path.exists(os.path.join(project_dir, "apply_to_router.sh")))
         self.assertFalse(os.path.exists(stockpile_path), "gemini_subscription.txt must not be created!")
         self.assertFalse(os.path.exists(tmp_stockpile), "gemini_subscription_tmp.txt must not be created!")
 
