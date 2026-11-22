@@ -2,13 +2,11 @@
 
 ## Principles
 
-- **Observable behaviour.** Tests check what a user or another module sees: files and
-  their permissions, HTTP answers, return codes, log lines, commands sent to the router.
-- **No network, no router.** Providers, subscriptions, the cores and the router's SSH side
-  are stand-ins, except where a test says it uses the real `./mihomo` binary or a real
-  Xray (`./xray`, or `xray` on PATH; skipped without one) and
-  `TestStreamFileToRouterHardware`, which logs in to a router at `192.168.1.1` when one
-  answers. A test that tries to download a core fails.
+- **Observable behaviour.** Tests check files and their permissions, HTTP responses,
+  return codes and log messages.
+- **Offline execution.** Tests use fixtures and loopback servers for providers and
+  subscriptions. Core integration tests run when a local `./mihomo`, `./xray` or
+  `xray` on PATH is available. The suite rejects attempts to download a core.
 - **Workspace rules** (`.agents/AGENTS.md`): stream teardown bounded by a timeout, ports
   from the kernel (`bind(('127.0.0.1', 0))`), single-attempt caches.
 
@@ -22,11 +20,10 @@ tests/
 ├── test_cli.py                 # Actions, options and the combinations that are refused
 ├── test_concurrency.py         # The workspace rules, also under load
 ├── test_config.py              # Settings: load, save, malformed values
-├── test_dependencies.py        # Running without psutil and Paramiko, as from requirements-termux.txt
+├── test_dependencies.py        # Memory detection and CLI startup without psutil
 ├── test_feed.py                # The feed's files, the feed command, serve and its CLI
 ├── test_fetcher.py             # Which subscription URLs are asked, decoding their payloads
 ├── test_hysteria2.py           # Both Hysteria 2 URI schemes, core options, port ranges and QUIC scan preparation
-├── test_install_router.py      # install-router: what is sent to the router, and its answers
 ├── test_location.py            # GeoIP consensus, the providers' requests and answers
 ├── test_main_routing.py        # Main-pool location policy and candidate selection
 ├── test_mihomo_batch.py        # One core instance per batch of nodes, through Mihomo: refused and
@@ -36,10 +33,7 @@ tests/
 │                               # the feed's Clash profile, only if its server answers through it,
 │                               # which only a scan through Mihomo asks
 ├── test_parsers.py             # Share links to Mihomo proxies, node names
-├── test_router_adversarial.py  # Streaming files to the router over SSH: quoting, payloads; with a
-│                               # live router in TestStreamFileToRouterHardware
-├── test_router_client.py       # SSH commands and file streams, and Paramiko being optional
-├── test_routing_pipeline.py    # Steer scans: the report, the feed, nothing sent to a router
+├── test_routing_pipeline.py    # Steer scans write the local report and feed
 ├── test_routing_ui.py          # Routing menu and routing CLI options
 ├── test_steer_export.py        # Steer main pool ranking and its redacted report
 ├── test_sub_cache.py           # Subscription cache: fallback to the last good payload, also against a
@@ -50,20 +44,13 @@ tests/
                                 # relaying through a local Hysteria 2 server
 ```
 
-The router installer's shell side, `nodesieve/router/openwrt_install.sh`, is checked with
-`sh -n` here; it was also run against an OpenWrt 24.10.5 container (install, reinstall,
-scans, uhttpd serving the feed, `--remove`).
-
 ## Running
 
 ```bash
 python -m pytest
-# Leave a router at 192.168.1.1 alone:
-python -m pytest --deselect tests/test_router_adversarial.py::TestStreamFileToRouterHardware
 ```
 
-The suite also runs with only `requirements-termux.txt` installed: the tests that need
-psutil or Paramiko skip.
+Tests that use psutil skip when it is unavailable.
 
 ## Project Directory Isolation
 

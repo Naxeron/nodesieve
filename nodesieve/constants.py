@@ -38,11 +38,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "use_mux": True,
     "mem_per_worker": 8,
     "enable_loc_ranking": False,
-    # How install-router reaches the router over SSH.
-    "router_host": "192.168.1.1",
-    "router_ssh_port": 22,
-    "router_ssh_user": "root",
-    "router_ssh_pass": "",
     # Subscription feed (nodesieve/feed.py): its directory, empty for feed/ in the project
     # directory, and the server `serve` runs. feed_token, the secret part of the feed's
     # address, is created by the first `serve`.

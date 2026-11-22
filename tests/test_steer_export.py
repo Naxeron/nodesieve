@@ -14,7 +14,7 @@ OTHER = "trojan://private-password@192.0.2.2:443?security=tls#Second"
 
 
 def config(tmp_path, **overrides):
-    return {"routing_output_dir": str(tmp_path / "output"), "routing": normalize_routing(), "router_host": "router.example", **overrides}
+    return {"routing_output_dir": str(tmp_path / "output"), "routing": normalize_routing(), **overrides}
 
 
 def export(route, options):
@@ -51,7 +51,7 @@ def test_ranks_the_pool_and_writes_only_a_redacted_report(tmp_path):
     report = json.loads(report_text)
     assert set(report) == {"ready", "created_at", "main", "errors", "warnings"}
     assert [node["country"] for node in report["main"]["eligible"]] == ["DE", "DE"]
-    for secret in ("11111111", "192.0.2.1", "private-password", "First", "router.example", "vless://"):
+    for secret in ("11111111", "192.0.2.1", "private-password", "First", "vless://"):
         assert secret not in report_text
     assert report["created_at"].endswith("+00:00")
     assert Path(result["report_path"]).stat().st_mode & 0o777 == 0o600

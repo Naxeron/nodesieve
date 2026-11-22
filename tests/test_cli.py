@@ -19,8 +19,8 @@ class TestCLI(unittest.TestCase):
         self.assertFalse(args.dry_run)
 
     def test_removed_actions_and_options_are_refused(self):
-        for argv in (["run"], ["deploy"], ["--run"], ["--check"], ["--deploy-only"], ["--no-router-validation"],
-                     ["--router-api-port", "9090"], ["--router-proxy-port", "7890"]):
+        for argv in (["run"], ["--run"], ["--check"], ["install-router"], ["--router-host", "router.example"],
+                     ["--scan-every", "6"], ["--remove", "1"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit) as exit_info:
                 build_parser().parse_args(argv)
             self.assertEqual(exit_info.exception.code, 2)
@@ -28,10 +28,10 @@ class TestCLI(unittest.TestCase):
     def test_parser_config_overrides(self):
         args = build_parser().parse_args([
             "--workers", "64", "--tcp-workers", "256", "--countries", "US,GB,DE",
-            "--speedtest-timeout", "15", "--router-host", "192.168.1.254",
+            "--speedtest-timeout", "15",
         ])
-        self.assertEqual((args.workers, args.tcp_workers, args.allowed_countries, args.speedtest_timeout,
-                          args.router_host), ("64", 256, "US,GB,DE", 15, "192.168.1.254"))
+        self.assertEqual((args.workers, args.tcp_workers, args.allowed_countries, args.speedtest_timeout),
+                         ("64", 256, "US,GB,DE", 15))
 
     @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
     def test_a_scan_runs_by_default_and_as_check(self, mock_pipeline):
@@ -184,25 +184,13 @@ class TestCLI(unittest.TestCase):
             mock_pipeline.assert_not_called()
 
     @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_router_ssh_port_input_validation(self, mock_pipeline):
-        for cmd in (["--router-ssh-port", "0"], ["--router-ssh-port", "99999"]):
-            with self.subTest(cmd=cmd), self.assertRaises(SystemExit) as cm:
-                main(cmd)
-            self.assertEqual(cm.exception.code, 1)
-        mock_pipeline.assert_not_called()
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
     def test_option_values_are_not_read_as_actions(self, mock_pipeline):
         mock_pipeline.return_value = True
-        for cmd in (["--router-ssh-user", "check"], ["--router-ssh-pass", "serve"], ["-s", "https://example.com/sub/check"]):
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-                json.dump({"subscriptions": ["https://example.com/sub"]}, f)
-                cfg_path = f.name
-            try:
-                main(["--config-file", cfg_path] + cmd)
-            finally:
-                os.remove(cfg_path)
-        self.assertEqual(mock_pipeline.call_count, 3)
+        for cmd in (["--output-dir", "check"], ["--output-dir", "serve"], ["-s", "https://example.com/sub/check"]):
+            with self.subTest(cmd=cmd):
+                mock_pipeline.reset_mock()
+                main(cmd)
+                mock_pipeline.assert_awaited_once_with(dry_run=False)
 
     @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
     def test_cli_empty_subscription_flag_exits_code_1(self, mock_pipeline):
@@ -210,15 +198,6 @@ class TestCLI(unittest.TestCase):
         for empty_val in ["", "   "]:
             with self.assertRaises(SystemExit) as cm:
                 main(["-s", empty_val])
-            self.assertEqual(cm.exception.code, 1)
-        mock_pipeline.assert_not_called()
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_empty_router_user_and_host_exits_code_1(self, mock_pipeline):
-        """Passing whitespace-only router host or user exits with code 1."""
-        for flag in ["--router-host", "--router-ssh-user"]:
-            with self.assertRaises(SystemExit) as cm:
-                main([flag, "   "])
             self.assertEqual(cm.exception.code, 1)
         mock_pipeline.assert_not_called()
 

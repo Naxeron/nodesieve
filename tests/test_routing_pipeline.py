@@ -1,4 +1,4 @@
-"""The Steer pipeline: a scan ranks the main pool into its report and the feed, and touches no router."""
+"""A Steer scan ranks the main pool and writes its report and subscription feed locally."""
 
 import asyncio
 import copy
@@ -14,7 +14,6 @@ def config_for(directory):
     return {
         "routing": normalize_routing({"enabled": True}),
         "routing_output_dir": str(directory),
-        "router_host": "192.0.2.1",
     }
 
 

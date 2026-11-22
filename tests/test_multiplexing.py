@@ -2,7 +2,7 @@
 
 A link does not say whether its server supports sing-mux, and a server without it
 drops every multiplexed connection. A node is therefore checked without
-multiplexing, and keeps it on the router only after answering a request through it.
+multiplexing, and keeps it in the feed's Clash profile only after answering a request through it.
 """
 
 import asyncio

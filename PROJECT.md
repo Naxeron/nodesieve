@@ -1,10 +1,11 @@
 # nodesieve
 
 ## Architecture
+
 `nodesieve` qualifies proxy nodes by their exit IP alone — no individual website is
-probed — and publishes the working ones as a subscription feed. It runs where the nodes
-are used, so the checks go through that device's own connection: a computer, Termux on
-Android, or an OpenWrt router that `install-router` set up.
+probed — and publishes the working ones as a subscription feed. On OpenWrt the checks
+run directly on the router through its own connection. The same pipeline runs locally
+on a computer or in Termux on Android.
 
 ```
 [Raw Subscriptions] (a failed or empty download falls back to that subscription's last good copy in sub_cache/)
@@ -29,8 +30,8 @@ Android, or an OpenWrt router that `install-router` set up.
        ▼
 [Subscription Feed] (feed/: share links, the same in base64, a Clash/Mihomo profile)
        ├── A scan without results leaves the feed as it was
-       ├── feed_command after a scan that updated it (on the router: Steer fetches its subscription)
-       └── Served by `python -m nodesieve serve`, or by the router's uhttpd under /www/nodesieve/<token>/
+       ├── Optional feed_command after a feed update (e.g. refresh Steer's subscription on the router)
+       └── Served by `python -m nodesieve serve`, or by uhttpd when configured to serve feed_dir
 ```
 
 ## Interface Contracts
@@ -73,12 +74,8 @@ Android, or an OpenWrt router that `install-router` set up.
 - `feed_status(config) -> {"count", "written_at"} | None`: The feed apps get now.
 - `build_app(config, token)` / `serve_feed(config, token, host, port)`: `GET`/`HEAD /<token>/<file>` for the three files with `profile-update-interval` and `profile-title` headers, 503 before the first feed, 404 for anything else. `cli.py` creates `feed_token` on the first `serve` and saves only that, refusing to save over a settings file it cannot read (`ConfigManager.load(strict=True)`).
 
-### `router/install.py` ↔ `cli.py`, and the router
-- `install_router(config, every, dry_run, remove) -> bool`: Looks at the router over SSH first (`RouterClient`, Paramiko imported only then; read-only `_PRECHECK`: OpenWrt release, package manager, free storage, an existing install, Zapret Manager, uhttpd's directory). Refuses anything but OpenWrt with opkg or apk and, for a new install, under 150 MB free. Then uploads `code_archive()` (the package and `THIRD_PARTY_NOTICES.md`; root-owned) to `/tmp/nodesieve-code.tgz` and streams `openwrt_install.sh` to `sh -s` with its `NS_*` values prepended, shell-quoted.
-- `router_settings(config, web_dir, steer)`: This computer's settings without router credentials or local paths, with `workers: auto`, the feed in `<uhttpd home>/nodesieve/<token>`, and `feed_command` set to Steer's `steer_action sub_refresh x` when Zapret Manager is installed.
-- `openwrt_install.sh` (BusyBox `sh`, one function): installs missing packages; replaces only the code in `/opt/nodesieve` (never `nodesieve_config.json`, `feed`, `sub_cache`, `steer-output`, `xray`, `mihomo`); writes settings only when there are none; makes the feed's directories 711 with an empty, readable `index.html`; keeps one tagged `# nodesieve-scan` line in root's crontab (`flock -n` against overlap). `NS_MODE=remove` deletes `/opt/nodesieve`, the web directory and that line. Reports through `NS_INFO`, `NS_NOTE` and `NS_ERROR` lines and `NS_OK` at the end.
-
 ## Code Layout
+
 ```
 nodesieve/
 ├── __main__.py                      # Entry point: python -m nodesieve
@@ -100,12 +97,9 @@ nodesieve/
 │   └── tester.py                    # Node tester: TCP ping, IP check, speedtest
 ├── parsers/                         # Share links to Xray outbounds and Mihomo proxies, node names
 ├── router/
-│   ├── client.py                    # SSH to the router (Paramiko), for install-router
-│   ├── install.py                   # install-router: nodesieve on an OpenWrt router over SSH
-│   ├── openwrt_install.sh           # Router side of install-router (packages, code, feed, cron)
 │   └── steer.py                     # Steer main-pool ranking and its report
 └── ui/
-    ├── cli.py                       # Command-line actions: check, serve, routing, config, install-router
+    ├── cli.py                       # Command-line actions: check, serve, routing, config
     ├── dashboard.py                 # Scan coordinator
     └── routing.py                   # Steer routing menu
 tests/                               # Test suite

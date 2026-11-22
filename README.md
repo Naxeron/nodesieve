@@ -2,28 +2,58 @@
 
 nodesieve checks VPN proxy nodes by their exit IP — reachability, exit address,
 country and location agreement — measures performance, and publishes the working ones
-as a [subscription feed](#subscription-feed) that any VPN app can subscribe to. It runs
-on a computer, in [Termux on Android](#termux-android), and
-[on an OpenWrt router](#running-on-the-router) itself, which then keeps its own feed
-current.
+as a subscription feed for VPN apps. Run it directly on an OpenWrt router to check nodes
+through the router's own connection. It also runs locally on a computer or in Termux
+on Android. [Subscription feed](#subscription-feed) · [Termux setup](#termux-android)
 
-Also supports **Steer** from [Zapret Manager](https://github.com/StressOzz/Zapret-Manager):
-nodesieve ranks nodes by location agreement for the servers of Steer's main section,
-which subscribes to the feed.
+Nodesieve can also rank the feed by location agreement for Steer's main section in
+[Zapret Manager](https://github.com/StressOzz/Zapret-Manager).
+
+## Running on the router
+
+Start with a checkout on writable storage on the router. If the router has Git and
+HTTPS access to the repository, `git clone https://github.com/Naxeron/nodesieve /opt/nodesieve`
+creates the directory used below. Allow about 150 MB for Python, its dependencies and
+the proxy core. Install the packages from the router's shell with its package manager.
+
+- **opkg** — `opkg update && opkg install python3 python3-aiohttp python3-yaml`
+- **apk** — `apk add python3 python3-aiohttp python3-yaml`
+
+Add a subscription, run the first scan, then serve the results.
 
 ```sh
-pip install -r requirements.txt
-python -m nodesieve --add-sub "https://example.org/your-subscription"
-python -m nodesieve check
-python -m nodesieve serve
+cd /opt/nodesieve
+python3 -m nodesieve --add-sub "https://example.org/your-subscription"
+python3 -m nodesieve check
+python3 -m nodesieve serve
 ```
 
-Run the commands in the project directory. `check`, the default action, tests the nodes
-and updates the feed; `serve` hands the feed to VPN apps. `--help` lists every option.
+`check` is the default action. Use the full option names or short flags shown by
+`--help`. `serve` runs in the foreground and prints feed URLs
+on `127.0.0.1:9876` for apps on the router. To serve LAN clients, use `--feed-host`
+with the router's LAN address. If uhttpd already serves your configured `feed_dir`,
+each scan updates the files at their existing URLs.
+
+For Steer, enable main-pool ranking with `python3 -m nodesieve routing` before scanning.
+In Zapret Manager's Steer connection tab, subscribe the main section to the `links.txt`
+URL. To refresh Steer after each feed update, set `feed_command` in
+`nodesieve_config.json` to `/opt/zapret-manager-luci/backend.sh steer_action sub_refresh x`.
+
+With `flock` installed, add this entry with `crontab -e` to scan every six hours.
+It skips the run if the previous scheduled scan is still active.
+
+```cron
+0 */6 * * * cd /opt/nodesieve && flock -n /var/lock/nodesieve.lock sh -c 'python3 -m nodesieve check > /tmp/nodesieve.log 2>&1'
+```
+
+Enable and start cron with `/etc/init.d/cron enable` and `/etc/init.d/cron start`.
+A Mihomo-target scan can download up to 25 MB per node that passes the IP check.
 
 ## Setup
 
 Developed and tested on Linux with Python 3.14, and on OpenWrt's Python 3.11.
+On a computer, install the dependencies with `python -m pip install -r requirements.txt`
+in the project directory. Use `python3` on OpenWrt wherever the examples use `python`.
 
 - **Core.** Nodes are checked through local instances of a proxy core, each serving up
   to 32 of them (see [Local core instances](#local-core-instances)):
@@ -35,9 +65,9 @@ Developed and tested on Linux with Python 3.14, and on OpenWrt's Python 3.11.
   with it; Mihomo's is the latest alpha build, from Mihomo's.
 - **Settings** are stored in `nodesieve_config.json` in the project directory. The
   file is created the first time settings are saved, for example by `--add-sub`, and
-  git ignores it because it holds subscription links and router credentials.
+  git ignores it because it holds subscription links and the feed token.
   `--show-config` prints the active settings and `--remove-sub` removes a
-  subscription.
+  subscription. Older settings files drop their router login fields on the next save.
 - **Subscription cache.** Every subscription that downloads with usable nodes is
   saved in `sub_cache/` in the project directory. When a subscription later can't be
   downloaded (timeout, connection error, an HTTP error) or returns no usable nodes,
@@ -64,18 +94,6 @@ git clone https://github.com/Naxeron/nodesieve ~/nodesieve
 cd ~/nodesieve
 pip install -r requirements-termux.txt
 ```
-
-That covers scanning and the [subscription feed](#subscription-feed). Setting up the
-router from the phone with `install-router` also needs Paramiko, for SSH. Its
-cryptography, bcrypt and PyNaCl have no Android wheels, so install those from Termux's
-packages first:
-
-```sh
-pkg install python-cryptography python-bcrypt python-pynacl
-pip install paramiko
-```
-
-Without Paramiko, `install-router` says what to install.
 
 - **Keep the project in Termux's home directory.** Shared storage (`~/storage/shared`)
   is mounted `noexec`, so the core can't run from there.
@@ -269,11 +287,11 @@ hands out each new scan's results without a restart. Apps that read the server's
 update interval refresh every 6 hours (`feed_update_hours`); others have an update
 setting of their own.
 
-- **Who can reach it.** `serve` listens on `127.0.0.1`, so only apps on the same device
-  can. `--feed-host 0.0.0.0` (or `feed_host`) makes it reachable from the local
-  network, for example to subscribe a phone to a computer's feed; anyone on that
-  network who learns the address can then read the nodes. `--feed-port` (or
-  `feed_port`) changes the port.
+- **Who can reach it.** By default, `serve` listens on `127.0.0.1` for apps on the
+  same device. Set `--feed-host` (or `feed_host`) to the LAN address to serve nearby
+  devices. `0.0.0.0` listens on every IPv4 interface. Anyone who can reach the server
+  and knows the feed URL can read the nodes. `--feed-port` (or `feed_port`) changes
+  the port.
 - **Credentials.** The feed holds proxy credentials. Its files are readable only by
   you, unless `feed_dir` is a directory others may enter, as a web server's must be,
   and git ignores `feed/`. To change the address, clear `feed_token` and restart
@@ -283,53 +301,6 @@ setting of their own.
 - **After a scan.** `feed_command` is a shell command run after each scan that updated
   the feed, except with `--dry-run`, for example to have an app fetch it right away.
   If it fails, the scan says so, and its result stands.
-
-## Running on the router
-
-nodesieve can run on an OpenWrt router itself, so that the router scans from its own
-connection and keeps its feed current without a computer. From a computer or phone
-that reaches the router over SSH, run:
-
-```sh
-python -m nodesieve install-router
-```
-
-It logs in to `router_host` (default `192.168.1.1`) as `router_ssh_user` (default
-`root`), with `router_ssh_pass` or, while that is empty, the SSH agent and default key
-files, then:
-
-1. **Packages.** Installs `python3`, `python3-aiohttp` and `python3-yaml` with opkg or
-   apk, where they are missing.
-   With the core binary the first scan downloads, nodesieve takes about 150 MB of the
-   router's storage.
-2. **Code.** Copies the code of this checkout to `/opt/nodesieve`. The repository is
-   private, so the router can't download it itself.
-3. **Settings.** On the first install, creates the router's settings from this
-   computer's: the same subscriptions and scan preferences, without router
-   credentials. The feed goes to `/www/nodesieve/<token>/`, where the router's web
-   server serves it to the local network.
-4. **Schedule.** Schedules `check` every 6 hours with cron (`--scan-every` takes 1, 2,
-   3, 4, 6, 8, 12 or 24, or 0 for no schedule). A scan that would start while the last
-   one is still running is skipped. Scans log to `/tmp/nodesieve.log` on the router.
-
-When it's done, it prints the feed's addresses and how to run a scan right away. With
-`--dry-run` it only looks at the router and says what it would do.
-
-- **Running it again** updates the code and the schedule and keeps the router's
-  settings. Change those on the router, for example with `python3 -m nodesieve
-  --add-sub <url>` in `/opt/nodesieve`.
-- **Removing it.** `--remove` deletes nodesieve, its settings, feed and schedule from
-  the router and leaves the packages.
-- **Bandwidth.** A Mihomo-target scan speed-tests every node that passes, downloading
-  up to 25 MB through each, so a scan of 40 nodes can download about 1 GB. Choose the
-  schedule with that in mind.
-
-**Steer.** With Zapret Manager on the router, the router's settings get a
-`feed_command` that asks Steer to fetch its subscription after each scan that updated
-the feed. Steer itself is not changed. Once, in the panel (Steer, Connection tab),
-subscribe its main section to the address `install-router` prints:
-`http://127.0.0.1/nodesieve/<token>/links.txt`. When Steer is busy or a download
-fails, it keeps the servers it has.
 
 ## Steer main pool
 
@@ -418,15 +389,7 @@ pip install pytest
 python -m pytest
 ```
 
-The suite runs offline, except `TestStreamFileToRouterHardware`, which runs whenever a
-device answers at `192.168.1.1`: it logs in over SSH as `root` with the SSH agent or
-default key files, then writes and removes temporary files in the router's `/tmp`. To
-leave the router alone:
-
-```sh
-python -m pytest --deselect tests/test_router_adversarial.py::TestStreamFileToRouterHardware
-```
-
+The suite runs offline using fixtures and loopback servers.
 Each test gets an empty temporary project directory, so a test run doesn't write
 to your `feed/`, `crashed_nodes.txt` or `sub_cache/`. If a test changes a file in the
 project directory anyway, the run fails and lists the file. See [PROJECT.md](PROJECT.md)

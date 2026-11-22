@@ -50,8 +50,13 @@ class ConfigManager:
 
     @classmethod
     def _normalize_config(cls, config: Dict[str, Any]) -> None:
-        """Replaces malformed values with their defaults."""
+        """Drop retired settings and replace malformed values with their defaults."""
         from nodesieve.routing import normalize_routing
+
+        # Older settings files may hold credentials for a remote router.
+        for key in ("router_host", "router_ssh_port", "router_ssh_user", "router_ssh_pass", "router_ssh_key_path",
+                    "router_api_port", "router_proxy_port", "enable_router_validation"):
+            config.pop(key, None)
         config["routing"] = normalize_routing(config.get("routing"))
 
         core = config.get("core")
@@ -94,18 +99,12 @@ class ConfigManager:
         except (ValueError, TypeError):
             config["mem_per_worker"] = 8.0
 
-        # Ensure router and feed ports are valid integers in port range
-        for port_field, default_port in [
-            ("router_ssh_port", 22),
-            ("feed_port", DEFAULT_CONFIG["feed_port"]),
-        ]:
-            try:
-                val = int(config.get(port_field, default_port))
-                config[port_field] = val if 1 <= val <= 65535 else default_port
-            except (ValueError, TypeError):
-                config[port_field] = default_port
-
         # Subscription feed
+        try:
+            port = int(config.get("feed_port", DEFAULT_CONFIG["feed_port"]))
+            config["feed_port"] = port if 1 <= port <= 65535 else DEFAULT_CONFIG["feed_port"]
+        except (ValueError, TypeError):
+            config["feed_port"] = DEFAULT_CONFIG["feed_port"]
         for text_field in ("feed_dir", "feed_token", "feed_command"):
             value = config.get(text_field)
             config[text_field] = value.strip() if isinstance(value, str) else ""

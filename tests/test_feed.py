@@ -107,8 +107,7 @@ def test_scan_without_share_links_leaves_the_feed_as_it_was(tmp_path, nodes):
 
 
 def test_feed_in_a_directory_others_may_enter_is_readable_for_a_web_server(tmp_path):
-    # uhttpd serves only files anyone may read; the router's installer opens the feed's
-    # directory for that (711: enter, not list).
+    # Mode 0711 lets uhttpd traverse the directory to serve a world-readable feed.
     (tmp_path / "feed").mkdir(mode=0o711)
     (tmp_path / "feed").chmod(0o711)
     write_feed([TROJAN], feed_config(tmp_path))
@@ -305,7 +304,7 @@ def test_steer_check_publishes_the_ranked_main_pool(tmp_path):
     fast = "trojan://password@fast.example:443?security=tls#fast"
     metadata = {slow: {"location": location(), "latency_ms": 7}, fast: {"location": location(), "latency_ms": 5}}
     config = {**feed_config(tmp_path), "routing": normalize_routing({"enabled": True}),
-              "routing_output_dir": str(tmp_path / "steer"), "router_host": "192.0.2.1"}
+              "routing_output_dir": str(tmp_path / "steer")}
     dashboard = VPNDashboard(config)
     scan = AsyncMock(return_value=([(slow, 7, slow), (fast, 5, fast)], MagicMock(node_metadata=metadata)))
     with patch.object(dashboard, "fetch_and_verify_candidates_async", scan):

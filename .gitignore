@@ -1,4 +1,4 @@
-# Local settings: subscription links and router credentials
+# Local settings contain subscription links and the feed token
 /nodesieve_config.json
 
 # Written by the checker; these hold proxy credentials

@@ -1,4 +1,4 @@
-"""nodesieve runs without psutil and Paramiko, as from requirements-termux.txt."""
+"""Memory detection and startup with the packages available on OpenWrt and Termux."""
 
 from pathlib import Path
 import subprocess
@@ -39,38 +39,28 @@ def test_without_proc_meminfo_psutil_answers(tmp_path, monkeypatch):
     assert get_free_memory_mb() == UNKNOWN_MEMORY_MB
 
 
-# The modules requirements-termux.txt leaves out, made unimportable in a fresh interpreter.
-WITHOUT_THEM = r"""
+# Exercise every module in a fresh interpreter with psutil unavailable.
+WITHOUT_PSUTIL = """
 import sys
-class Missing:
-    def find_spec(self, name, path=None, target=None):
-        if name.split(".")[0] in ("psutil", "paramiko", "cryptography", "bcrypt", "nacl"):
-            raise ImportError(f"No module named {name!r}")
-sys.meta_path.insert(0, Missing())
-sys.path.insert(0, sys.argv[1])
+sys.modules["psutil"] = None
 import importlib, pkgutil
 import nodesieve
 for module in pkgutil.walk_packages(nodesieve.__path__, "nodesieve."):
     importlib.import_module(module.name)
 from nodesieve.core.limits import ResourceLimits
 from nodesieve.logging import get_free_memory_mb
-from nodesieve.router.client import RouterClient
 workers, free = ResourceLimits.get_max_safe_workers({})
 assert workers >= 1 and free > 0 and get_free_memory_mb() > 0
-code, out, err = RouterClient(host="127.0.0.1", ssh_port=9).exec_command("true")
-print(code, err)
+from nodesieve.ui.cli import main
+main(["--help"])
 """
 
 
-def test_nodesieve_runs_without_psutil_or_paramiko():
-    finished = subprocess.run([sys.executable, "-c", WITHOUT_THEM, str(PROJECT)], capture_output=True,
+def test_nodesieve_runs_without_psutil():
+    finished = subprocess.run([sys.executable, "-c", WITHOUT_PSUTIL], cwd=PROJECT, capture_output=True,
                               text=True, timeout=60)
     assert finished.returncode == 0, finished.stderr
-    assert "-1 Reaching the router over SSH needs Paramiko: pip install paramiko" in finished.stdout
-    cli = subprocess.run([sys.executable, "-c", WITHOUT_THEM.split("import importlib")[0]
-                          + "from nodesieve.ui.cli import main\nmain(['--help'])", str(PROJECT)],
-                         capture_output=True, text=True, timeout=60)
-    assert cli.returncode == 0 and "install-router" in cli.stdout, cli.stderr
+    assert "--feed-host" in finished.stdout
 
 
 @pytest.mark.parametrize("name", ["requirements.txt", "requirements-termux.txt"])
@@ -79,5 +69,4 @@ def test_requirements_ask_psutil_only_where_proc_meminfo_is_missing(name):
              if line.strip() and not line.lstrip().startswith("#")]
     psutil = [line for line in lines if line.startswith("psutil")]
     assert all('platform_system != "Linux" and platform_system != "Android"' in line for line in psutil)
-    assert ("paramiko" in lines) == (name == "requirements.txt")
     assert {"aiohttp", "PyYAML"} <= set(lines)

@@ -1,4 +1,4 @@
-"""Command-line entry point: scans, the feed server, the router installer and settings."""
+"""Command-line entry point for scans, the feed server and settings."""
 
 import argparse
 import asyncio
@@ -13,7 +13,6 @@ from nodesieve.config import ConfigManager
 from nodesieve.constants import CORES, CRASHED_LOG_FILE, DEFAULT_CONFIG, PROJECT_ROOT
 from nodesieve.feed import new_token, serve_feed, valid_token
 from nodesieve.logging import log
-from nodesieve.router.install import SCAN_HOURS, install_router
 from nodesieve.routing import normalize_routing
 from nodesieve.ui.dashboard import VPNDashboard
 from nodesieve.ui.routing import format_routing, routing_menu
@@ -35,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     """The command line: one action, and options that adjust it."""
     parser = argparse.ArgumentParser(
         prog="python -m nodesieve",
+        allow_abbrev=False,  # Keep --remove from resolving to --remove-sub.
         description="nodesieve - Check VPN proxy exit IPs and locations, and publish the working ones "
                     "as a subscription feed",
     )
@@ -42,19 +42,17 @@ def build_parser() -> argparse.ArgumentParser:
         "action",
         nargs="?",
         default=None,
-        choices=["check", "config", "routing", "serve", "install-router"],
+        choices=["check", "config", "routing", "serve"],
         action=_ActionCapture,
         help="'check' (default: scan the subscriptions and update the feed), "
              "'config' (print the settings), "
              "'routing' (edit Steer main-pool routing in a terminal, or display it when piped), "
-             "'serve' (serve the subscription feed that scans write, for VPN apps to subscribe to), "
-             "'install-router' (install nodesieve on an OpenWrt router over SSH, so that it scans for itself).",
+             "'serve' (serve the subscription feed that scans write, for VPN apps to subscribe to).",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="For 'check': scan and write the feed, but don't run feed_command. "
-             "For 'install-router': only look at the router and say what would be done.",
+        help="Scan and write the feed, skipping feed_command for this run.",
     )
 
     # Sourcing & concurrency overrides
@@ -129,48 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print Steer routing preferences without credentials or interaction and exit.",
     )
 
-    # How install-router reaches the router
-    parser.add_argument(
-        "--router-host",
-        dest="router_host",
-        help="Router IP address or hostname (default: 192.168.1.1).",
-    )
-    parser.add_argument(
-        "--router-ssh-port",
-        dest="router_ssh_port",
-        type=int,
-        help="Router SSH port (default: 22).",
-    )
-    parser.add_argument(
-        "--router-ssh-user",
-        dest="router_ssh_user",
-        help="Router SSH username (default: root).",
-    )
-    parser.add_argument(
-        "--router-ssh-pass",
-        dest="router_ssh_pass",
-        help="Router SSH password.",
-    )
-
-    # Installing on the router
-    parser.add_argument(
-        "--scan-every",
-        dest="scan_every",
-        type=int,
-        help="For 'install-router': hours between the router's scheduled scans, "
-             "one of 1, 2, 3, 4, 6, 8, 12, 24, or 0 for none (default: 6).",
-    )
-    parser.add_argument(
-        "--remove",
-        action="store_true",
-        help="For 'install-router': remove nodesieve, its settings, feed and schedule from the router instead.",
-    )
-
     # Subscription feed server
     parser.add_argument(
         "--feed-host",
         dest="feed_host",
-        help="Address 'serve' listens on (default: 127.0.0.1, this device only; 0.0.0.0 for the local network).",
+        help="Address 'serve' listens on (default 127.0.0.1). Use the LAN address to serve local network clients.",
     )
     parser.add_argument(
         "--feed-port",
@@ -259,10 +220,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(1)
     managing = args.action == "config" or args.show_config or args.add_sub is not None or args.remove_sub is not None
     routing_management = args.action == "routing" or args.routing_setup or args.routing_show
-    installing = args.action == "install-router"
     scanning = args.action == "check" and not (managing or routing_management)
-    if args.dry_run and not (scanning or installing):
-        log.error("[-] --dry-run is an option of 'check' and 'install-router'.")
+    if args.dry_run and not scanning:
+        log.error("[-] --dry-run is an option of 'check'.")
         sys.exit(1)
     if routing_management and (getattr(args, "action_explicit", False) and args.action == "check"):
         log.error("[-] Conflicting options: Routing setup/display cannot be combined with a scan.")
@@ -272,16 +232,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(1)
     if args.action == "serve" and (routing_management or managing):
         log.error("[-] Conflicting options: 'serve' runs on its own, without routing or configuration options.")
-        sys.exit(1)
-    if installing and (routing_management or managing):
-        log.error("[-] Conflicting options: 'install-router' takes no routing or configuration options.")
-        sys.exit(1)
-    if not installing and (args.scan_every is not None or args.remove):
-        log.error("[-] --scan-every and --remove are options of 'install-router'.")
-        sys.exit(1)
-    if args.scan_every is not None and args.scan_every not in SCAN_HOURS:
-        log.error("[-] --scan-every takes one of " + ", ".join(str(hours) for hours in SCAN_HOURS)
-                  + " (hours; 0 for no schedule).")
         sys.exit(1)
 
     # Routing overrides also apply to display and setup, before their early exits.
@@ -421,32 +371,6 @@ def main(argv: Optional[List[str]] = None) -> None:
             log.error("[-] --min-speed-percent must be between 0 and 100.")
             sys.exit(1)
         config["min_speed_percent"] = args.min_speed_percent
-
-    if args.router_host is not None:
-        host_val = args.router_host.strip()
-        if not host_val:
-            log.error("[-] Router host cannot be empty.")
-            sys.exit(1)
-        config["router_host"] = host_val
-
-    if args.router_ssh_port is not None:
-        if not 1 <= args.router_ssh_port <= 65535:
-            log.error(f"[-] Invalid port {args.router_ssh_port} for --router-ssh-port. Port must be between 1 and 65535.")
-            sys.exit(1)
-        config["router_ssh_port"] = args.router_ssh_port
-
-    if args.router_ssh_user is not None:
-        user_val = args.router_ssh_user.strip()
-        if not user_val:
-            log.error("[-] Router SSH user cannot be empty.")
-            sys.exit(1)
-        config["router_ssh_user"] = user_val
-    if args.router_ssh_pass:
-        config["router_ssh_pass"] = args.router_ssh_pass
-
-    if installing:
-        every = 6 if args.scan_every is None else args.scan_every
-        sys.exit(0 if install_router(config, every=every, dry_run=args.dry_run, remove=args.remove) else 1)
 
     # A scan starts a new crash log.
     try:

@@ -1,4 +1,4 @@
-"""Routing preferences are editable without network access or accidental deployment."""
+"""Editing local routing preferences and displaying them without credentials."""
 
 from copy import deepcopy
 import io
@@ -22,7 +22,7 @@ class RoutingMenuTests(unittest.TestCase):
 
     def test_defaults_show_exclusions_and_threshold_without_exposing_secrets(self):
         text = format_routing({
-            "router_ssh_pass": "DO-NOT-PRINT",
+            "feed_token": "DO-NOT-PRINT",
             "subscriptions": ["https://secret.example/token"],
         })
         self.assertIn("Enabled: OFF", text)
@@ -39,7 +39,7 @@ class RoutingMenuTests(unittest.TestCase):
         self.assertNotIn("secret.example", text)
 
     def test_edit_preserves_unrelated_config_and_only_save_returns_new_config(self):
-        config = {"router_ssh_pass": "keep", "routing": normalize_routing(None)}
+        config = {"feed_token": "keep", "routing": normalize_routing(None)}
         original = deepcopy(config)
         result, text = self.edit(config, ["1", "2", "ru, by", "3", "us de", "4", "75.5%", "4", "6"])
         self.assertEqual(config, original)
@@ -48,7 +48,7 @@ class RoutingMenuTests(unittest.TestCase):
             "main": {"excluded_countries": ["RU", "BY"], "allowed_countries": ["US", "DE"],
                      "min_agreement": 0.755, "min_votes": 4},
         })
-        self.assertEqual(result["router_ssh_pass"], "keep")
+        self.assertEqual(result["feed_token"], "keep")
         self.assertIn("3 of 5 reports agreeing means 60%", text)
         self.assertIn("IPv4 and IPv6 are checked separately", text)
 
@@ -115,7 +115,7 @@ class RoutingCLITests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.config_file = os.path.join(self.directory.name, "config.json")
         with open(self.config_file, "w", encoding="utf-8") as stream:
-            json.dump({"router_ssh_pass": "private-password"}, stream)
+            json.dump({"feed_token": "private-feed-token"}, stream)
 
     def invoke(self, args, tty=False, menu_result=None):
         with (
@@ -133,7 +133,7 @@ class RoutingCLITests(unittest.TestCase):
         code, text, menu = self.invoke(["routing"])
         self.assertEqual(code, 0)
         self.assertIn("Main proxy pool: automatic location ranking", text)
-        self.assertNotIn("private-password", text)
+        self.assertNotIn("private-feed-token", text)
         menu.assert_not_called()
 
     def test_routing_show_never_prompts_even_in_terminal_and_applies_overrides(self):

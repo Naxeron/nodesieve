@@ -1,6 +1,8 @@
 """Unit tests for configuration manager and serialization."""
 
+import json
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from nodesieve.config import ConfigManager
@@ -31,6 +33,25 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(loaded["tcp_workers"], 256)
             self.assertEqual(loaded["allowed_countries"], ["US", "DE"])
             self.assertFalse(loaded["use_mux"])
+
+    def test_legacy_connection_settings_are_dropped_on_the_next_save(self):
+        legacy = {
+            "router_host": "router.example", "router_ssh_port": 22, "router_ssh_user": "root",
+            "router_ssh_pass": "old-password", "router_ssh_key_path": "/old/key",
+            "router_api_port": 9090, "router_proxy_port": 7890, "enable_router_validation": True,
+        }
+        local = {"subscriptions": ["https://example.com/sub"], "feed_dir": "/www/nodesieve/example",
+                 "routing_output_dir": "reports", "workers": 4}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / CONFIG_FILE
+            path.write_text(json.dumps({**local, **legacy}), encoding="utf-8")
+            loaded = ConfigManager.load(path)
+            self.assertTrue(legacy.keys().isdisjoint(loaded))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {**local, **legacy})
+            ConfigManager.save(loaded, path)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(legacy.keys().isdisjoint(saved))
+            self.assertEqual({key: saved[key] for key in local}, local)
 
     def test_min_speed_percent_round_trip_and_invalid_values(self):
         default = DEFAULT_CONFIG["min_speed_percent"]
