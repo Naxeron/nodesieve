@@ -25,6 +25,7 @@ tests/
 ├── test_dependencies.py        # Running without psutil and Paramiko, as from requirements-termux.txt
 ├── test_feed.py                # The feed's files, the feed command, serve and its CLI
 ├── test_fetcher.py             # Which subscription URLs are asked, decoding their payloads
+├── test_hysteria2.py           # Both Hysteria 2 URI schemes, core options, port ranges and QUIC scan preparation
 ├── test_install_router.py      # install-router: what is sent to the router, and its answers
 ├── test_location.py            # GeoIP consensus, the providers' requests and answers
 ├── test_main_routing.py        # Main-pool location policy and candidate selection
@@ -45,7 +46,8 @@ tests/
 │                               # local HTTP server that fails
 ├── test_tester.py              # NodeTester: TCP ping, IP resolution, the IP check, speedtest
 └── test_xray_core.py           # Xray: links to outbounds, its configuration and log, the download and
-                                # its SHA-256, batches through a stand-in for Xray and the real binary
+                                # its SHA-256, batches through a stand-in and the real binary, and both cores
+                                # relaying through a local Hysteria 2 server
 ```
 
 The router installer's shell side, `nodesieve/router/openwrt_install.sh`, is checked with

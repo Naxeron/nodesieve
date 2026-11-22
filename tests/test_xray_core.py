@@ -17,6 +17,8 @@ import json
 import os
 import shutil
 import socket
+import ssl
+import subprocess
 import sys
 import threading
 import zipfile
@@ -27,7 +29,7 @@ import aiohttp
 import pytest
 
 from nodesieve.config import ConfigManager
-from nodesieve.constants import XRAY_PATH
+from nodesieve.constants import MIHOMO_PATH, XRAY_PATH
 from nodesieve.core import batch as core_batch
 from nodesieve.core import xray
 from nodesieve.core.batch import BatchNode, CoreBatch, CoreRunner, PortManager, core_for
@@ -477,15 +479,17 @@ async def socks5_get(port, target_port):
 
 
 @contextlib.asynccontextmanager
-async def shadowsocks_server(binary, tmp_path):
-    """A real Xray serving Shadowsocks, which goes out directly: the far end of the test nodes."""
-    port, ready_port = PortManager.get_free_port(), PortManager.get_free_port()
+async def xray_server(binary, tmp_path, inbound, socket_type=socket.SOCK_STREAM):
+    """Run the far end of a test node on a kernel-allocated port."""
+    with socket.socket(socket.AF_INET, socket_type) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+        ready_port = PortManager.get_free_port()
     ready_server = await asyncio.start_server(core_batch._serve_ready, "127.0.0.1", 0)
     config = {
         "log": {"loglevel": "warning", "access": "none"},
         "inbounds": [
-            {"tag": "ss-in", "listen": "127.0.0.1", "port": port, "protocol": "shadowsocks",
-             "settings": {"method": "aes-128-gcm", "password": PASSWORD, "network": "tcp"}},
+            {**inbound, "listen": "127.0.0.1", "port": port},
             {"tag": "ready-in", "listen": "127.0.0.1", "port": ready_port, "protocol": "mixed", "settings": {}},
         ],
         "outbounds": [
@@ -511,13 +515,13 @@ async def shadowsocks_server(binary, tmp_path):
                 break
             await asyncio.sleep(0.02)
         else:
-            pytest.fail("The Shadowsocks Xray did not start")
+            pytest.fail(f"The {inbound['protocol']} server did not start")
         yield port
     finally:
         ready_server.close()
-        process.terminate()
+        if process.returncode is None:
+            process.terminate()
         await process.wait()
-        PortManager.release_port(port)
         PortManager.release_port(ready_port)
 
 
@@ -532,7 +536,8 @@ def test_real_xray_serves_each_node_through_its_own_listener(real_xray, tmp_path
         target = await asyncio.start_server(lambda r, w: _answer(r, w, hits), "127.0.0.1", 0)
         recorder = await asyncio.start_server(record, "127.0.0.1", 0)
         url = f"http://127.0.0.1:{target.sockets[0].getsockname()[1]}/"
-        async with shadowsocks_server(real_xray, tmp_path) as ss_port:
+        inbound = {"protocol": "shadowsocks", "settings": {"method": "aes-128-gcm", "password": PASSWORD, "network": "tcp"}}
+        async with xray_server(real_xray, tmp_path, inbound) as ss_port:
             nodes = [BatchNode(ss("127.0.0.1", "A", port=ss_port)),
                      BatchNode(ss("127.0.0.1", "B", port=recorder.sockets[0].getsockname()[1])),
                      BatchNode(ss("10.0.0.9", "C", cipher="not-a-cipher"))]
@@ -555,6 +560,45 @@ def test_real_xray_serves_each_node_through_its_own_listener(real_xray, tmp_path
         recorder.close()
         # B's listener led only to B's server, though nothing else goes anywhere.
         assert len(hits) == 2 and len(recorded) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("core", ["xray", "mihomo"])
+@pytest.mark.parametrize("obfs", ["salamander", "gecko"])
+def test_real_core_relays_through_a_udp_only_hysteria2_server(real_xray, tmp_path, core, obfs):
+    if core == "mihomo" and not os.access(MIHOMO_PATH, os.X_OK):
+        pytest.skip("no Mihomo binary in the project directory")
+    cert = json.loads(subprocess.check_output([real_xray, "tls", "cert", "-domain=hy2.test", "-json"], cwd=tmp_path))
+    pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert("\n".join(cert["certificate"]))).hexdigest()
+    obfs_settings = {"password": "test-obfs"}
+    if obfs == "gecko":
+        obfs_settings["packetSize"] = "512-1200"
+    inbound = {"protocol": "hysteria", "settings": {"version": 2},
+               "streamSettings": {"network": "hysteria", "security": "tls", "tlsSettings": {"certificates": [cert]},
+                                  "hysteriaSettings": {"version": 2, "auth": PASSWORD},
+                                  "finalmask": {"udp": [{"type": "salamander", "settings": obfs_settings}]}}}
+
+    async def run():
+        hits = []
+        target = await asyncio.start_server(lambda r, w: _answer(r, w, hits), "127.0.0.1", 0)
+        async with target, xray_server(real_xray, tmp_path, inbound, socket.SOCK_DGRAM) as port:
+            # Only the hopping port has a server. This also detects cores silently ignoring mport.
+            link = (f"hy2://{PASSWORD}@127.0.0.1:1/?mport={port}&sni=hy2.test&pinSHA256={pin}"
+                    f"&obfs={obfs}&obfs-password=test-obfs&insecure=1#Local")
+            url = f"http://127.0.0.1:{target.sockets[0].getsockname()[1]}/"
+            async with CoreBatch([BatchNode(link), BatchNode(link.replace(pin, "00" * 32))], {"core": core}) as batch:
+                endpoint, wrong_pin = batch.endpoints
+                assert not endpoint.error and not wrong_pin.error
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                    async with session.get(url, proxy=endpoint.proxy_url) as response:
+                        assert await response.text() == "hello"
+                    try:
+                        async with session.get(url, proxy=wrong_pin.proxy_url) as response:
+                            assert response.status != 200
+                    except (aiohttp.ClientError, asyncio.TimeoutError):
+                        pass
+            assert hits == [1]
 
     asyncio.run(run())
 

@@ -13,6 +13,7 @@ from nodesieve.geo import GeolocationService
 from nodesieve.logging import ErrorTracker, safe_close_writer, safe_print
 from nodesieve.parsers.base import (
     extract_host_port,
+    extract_node_protocol,
     format_descriptive_node_name,
     get_node_name,
 )
@@ -51,7 +52,7 @@ class NodeTester:
         self._location_semaphore = asyncio.Semaphore(6)
 
     async def async_check_tcp_node(self, node: str, timeout: float = 1.5) -> Optional[str]:
-        """Phase 0 TCP Ping: Tests raw TCP port reachability."""
+        """Check TCP reachability where applicable. QUIC is tested by the core in phase 1."""
         node_name = get_node_name(node)
         if "Авто" in node_name or "⬇" in node_name:
             return None
@@ -59,6 +60,8 @@ class NodeTester:
         host, port = extract_host_port(node)
         if not host or not port:
             return None
+        if extract_node_protocol(node) == "HYSTERIA2":
+            return node
 
         try:
             fut = asyncio.open_connection(host, port)

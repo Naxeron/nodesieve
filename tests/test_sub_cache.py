@@ -100,6 +100,11 @@ class TestSubscriptionCache(unittest.TestCase):
                 self.assertEqual(self.fetch(failure), [NODE_A, NODE_B])
             self.assertTrue(any("Using 2 cached nodes" in line for line in logs.output), logs.output)
 
+    def test_hysteria_only_subscription_survives_refresh_with_invalid_ports(self):
+        nodes = ["hy2://pw@node.example/#One", "hysteria2://user:pw@[2001:db8::1]:443,8443/#Two"]
+        self.assertEqual(self.fetch(_Response(200, _payload(*nodes)), use_mux=True), nodes)
+        self.assertEqual(self.fetch(_Response(200, b"hy2://pw@node.example:65536"), use_mux=True), nodes)
+
     def test_failed_fetch_without_cache_returns_nothing(self):
         for name, failure in FAILURES.items():
             with self.subTest(name):

@@ -41,7 +41,7 @@ VLESS_NAME = "[VLESS: First] 🇩🇪 Germany | 203.0.113.1"
 # One whose server answered through multiplexing, so it keeps it.
 TROJAN = "trojan://private-password@192.0.2.2:443?security=tls&sni=example.org#Second"
 SS = "ss://YWVzLTI1Ni1nY206c2VjcmV0@192.0.2.3:8388#Third"
-# Links of kinds nodesieve doesn't check, which the feed leaves out.
+# VMess stays out of the feed.
 VMESS = "vmess://eyJhZGQiOiIxOTIuMC4yLjUifQ==#vmess"
 HYSTERIA = "hysteria2://secret@192.0.2.8:443#hysteria"
 TOKEN = "t" * 24
@@ -59,15 +59,15 @@ def read(tmp_path, name):
 # The files a scan writes
 
 def test_scan_results_become_share_links_base64_and_a_clash_profile(tmp_path):
-    result = write_feed([VLESS, VMESS, TROJAN, HYSTERIA], feed_config(tmp_path))
+    result = write_feed([VLESS, VMESS, TROJAN, HYSTERIA, HYSTERIA.replace("hysteria2://", "hy2://")], feed_config(tmp_path))
     directory = tmp_path / "feed"
-    assert result == {"written": True, "count": 2, "left_out": 2, "directory": str(directory)}
+    assert result == {"written": True, "count": 3, "left_out": 1, "directory": str(directory)}
     links = read(tmp_path, LINKS_NAME)
     # In the scan's order, one per line. smux is nodesieve's own marker: no other app reads it.
-    assert links == VLESS_SHARED + "\n" + TROJAN + "\n"
+    assert links == VLESS_SHARED + "\n" + TROJAN + "\n" + HYSTERIA + "\n"
     assert base64.b64decode(read(tmp_path, BASE64_NAME)).decode() == links
     profile = yaml.safe_load(read(tmp_path, CLASH_NAME))
-    names = [VLESS_NAME, "Second"]
+    names = [VLESS_NAME, "Second", "hysteria"]
     assert [proxy["name"] for proxy in profile["proxies"]] == names
     assert profile["proxy-groups"] == [
         {"name": "nodesieve", "type": "select", "proxies": ["Auto", *names]},
@@ -78,6 +78,8 @@ def test_scan_results_become_share_links_base64_and_a_clash_profile(tmp_path):
     # Multiplexing stays as the scan found it: off where the server did not answer through it.
     assert "smux" not in profile["proxies"][0]
     assert profile["proxies"][1]["smux"]["enabled"] is True
+    assert profile["proxies"][2] == {"type": "hysteria2", "name": "hysteria", "server": "192.0.2.8",
+                                     "port": 443, "password": "secret", "udp": True}
     # The files hold proxy credentials.
     assert directory.stat().st_mode & 0o777 == 0o700
     for name in FILES:
@@ -93,7 +95,7 @@ def test_profile_turns_multiplexing_on_only_where_the_scan_checked_it(tmp_path, 
     assert not any("smux" in proxy for proxy in proxies)
 
 
-@pytest.mark.parametrize("nodes", [[], [VMESS, HYSTERIA], ["vless://unreadable"]])
+@pytest.mark.parametrize("nodes", [[], [VMESS, "hy2://user@:443"], ["vless://unreadable"]])
 def test_scan_without_share_links_leaves_the_feed_as_it_was(tmp_path, nodes):
     config = feed_config(tmp_path)
     write_feed([VLESS, TROJAN], config)
@@ -148,7 +150,7 @@ def test_profile_names_are_unique_and_never_a_reserved_name():
 def test_profile_passes_mihomo_check(tmp_path):
     if not (os.path.isfile(MIHOMO_PATH) and os.access(MIHOMO_PATH, os.X_OK)):
         pytest.skip(f"Mihomo binary not executable at {MIHOMO_PATH}")
-    write_feed([VLESS, TROJAN, SS], feed_config(tmp_path))
+    write_feed([VLESS, TROJAN, SS, HYSTERIA], feed_config(tmp_path))
     check = subprocess.run([MIHOMO_PATH, "-t", "-d", str(tmp_path), "-f", str(tmp_path / "feed" / CLASH_NAME)],
                            capture_output=True, text=True, timeout=60)
     assert check.returncode == 0, check.stdout + check.stderr

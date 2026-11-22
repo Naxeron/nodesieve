@@ -135,7 +135,8 @@ optimization as well, or Android may stop it anyway.
 
 Every node from the configured subscriptions goes through the same IP check:
 
-1. **TCP reachability.** A raw connection to the node's host and port.
+1. **TCP reachability.** A raw connection to the node's host and port for TCP-based
+   nodes. Hysteria 2 uses QUIC over UDP and goes straight to the exit IP check.
 2. **Exit IP.** The node is reached through a local port of its own on a local
    instance of the core and asked for its exit address through Cloudflare's trace
    endpoint, over IPv4 and IPv6 separately. This yields the exit IP, its country and
@@ -163,6 +164,13 @@ consensus, with its agreement and vote count.
 
 ### How a node is connected
 
+Both cores accept `hysteria2://` and `hy2://` links in plain-text and base64
+subscriptions. A link with no port uses UDP 443. Port lists and ranges, SNI,
+certificate pins (`pinSHA256`), and Salamander or Gecko obfuscation carry through
+to the connection and the Clash profile. For a self-signed Hysteria 2 server,
+include its certificate pin or use `--core mihomo` for a link that relies on
+`insecure=1`. Xray 26 requires a trusted certificate or a matching pin.
+
 Through Xray, each link becomes an Xray outbound with every option it carries, so a
 node is checked the way Xray-based apps (v2rayN, v2rayNG, Happ and others) connect to
 it: REALITY and XTLS Vision; the TCP, WebSocket, HTTPUpgrade, gRPC and XHTTP
@@ -178,8 +186,9 @@ profile, so a node is checked the way Clash apps connect to it. The same transpo
 node that only works with it fails the check.
 
 `use_mux`, on by default, adds sing-mux multiplexing (Mihomo's `smux`) to every node
-except VLESS with XTLS Vision. Multiplexing only works when the node's server
-supports it, which a link doesn't say, and a server without it, which includes every
+except VLESS with XTLS Vision and Hysteria 2, which already multiplexes streams over QUIC.
+Sing-mux only works when the node's server supports it, which a link doesn't say,
+and a server without it, which includes every
 Xray server, drops each multiplexed connection. So a node is always checked without
 multiplexing. One that qualifies is then asked for a single request through it and
 keeps multiplexing, in the speedtest and in the feed's Clash profile, only if it
@@ -235,7 +244,7 @@ The feed holds the scan's result, in its order: the 30 fastest working nodes for
 Mihomo target, the ranked main pool for Steer. The profile's `Auto` group uses the first
 node in that order that answers, and the `nodesieve` group in front of it lets you pick
 a node by hand. Multiplexing is on only for nodes whose server answered through it in
-the scan. Only VLESS, Trojan and Shadowsocks links go in.
+the scan. The feed accepts VLESS, Trojan, Shadowsocks and Hysteria 2 links.
 
 A scan that finds nothing leaves the feed as it was, so subscribed apps keep the nodes
 of the last scan that found some. The scan says how old they are.
@@ -390,7 +399,7 @@ python -m nodesieve --routing-show
   from it.
 - **Location of checks:** the checks run where nodesieve runs, through that
   device's connection: on the router, from the router's own. Steer takes VLESS,
-  Trojan and Shadowsocks nodes.
+  Trojan, Shadowsocks and Hysteria 2 nodes from nodesieve.
 - **Freshness:** Steer keeps choosing among the scanned servers by reachability or
   ping. It does not recheck location agreement or country exclusions; the next scan
   does.

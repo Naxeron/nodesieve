@@ -23,8 +23,8 @@ class VPNDashboard:
         self.config = config if config is not None else ConfigManager.load()
 
     async def filter_tcp(self, nodes: List[str], workers: int) -> List[str]:
-        """Phase 0: Concurrently ping TCP ports of raw subscription nodes."""
-        log.info(f"[*] Phase 0: TCP Ping filter on {len(nodes)} nodes using {workers} concurrent async connections...")
+        """Filter TCP-based candidates and pass QUIC nodes through to the exit IP check."""
+        log.info(f"[*] Phase 0: Filtering {len(nodes)} candidates with {workers} TCP workers (Hysteria 2 skips TCP)...")
         queue = asyncio.Queue()
         for n in nodes:
             queue.put_nowait(n)
@@ -112,10 +112,10 @@ class VPNDashboard:
         tcp_survivors_count = len(tcp_survivors)
 
         if tcp_survivors_count == 0:
-            log.info("[-] No nodes survived the TCP ping filter.")
+            log.info("[-] No candidates for the exit IP check.")
             return [], None
 
-        log.info(f"[*] Survived TCP ping: {tcp_survivors_count}")
+        log.info(f"[*] Candidates for the exit IP check: {tcp_survivors_count}")
         log.info(f"[*] System has {free_mem_mb:.0f}MB free memory. HTTP workers set to {self.config['workers']}.")
         num_workers = min(self.config["workers"], tcp_survivors_count)
         per_instance, instances = ResourceLimits.core_instances(num_workers)

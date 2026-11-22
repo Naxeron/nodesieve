@@ -1,4 +1,4 @@
-"""Converts proxy URI schemes (VLESS, Trojan, Shadowsocks) to Xray outbound definitions.
+"""Converts share links to Xray outbound definitions.
 
 Share links are written for Xray, so every option they carry goes over as it is: REALITY,
 XTLS Vision, the transports with their settings (XHTTP's "extra" included), and the
@@ -9,6 +9,8 @@ import base64
 import json
 import urllib.parse
 from typing import Any, Dict, Optional, Tuple
+
+from nodesieve.parsers.hysteria2 import HYSTERIA2_SCHEMES, Hysteria2Link, parse_hysteria2
 
 
 def _b64decode(text: str) -> str:
@@ -25,7 +27,6 @@ def _host_port(text: str) -> Tuple[str, int]:
 
 def _parse(url: str) -> Optional[Tuple[str, str, str, int, Dict[str, str]]]:
     """(scheme, user part, server, port, query) of a link, or None when it has no server."""
-    url = url.strip()
     core = url.split("#", 1)[0]
     core, _, query_text = core.partition("?")
     scheme, sep, authority = core.partition("://")
@@ -127,12 +128,56 @@ def _stream_settings(scheme: str, q: Dict[str, str]) -> Optional[Dict[str, Any]]
     return stream
 
 
+def _hysteria2_outbound(link: Hysteria2Link) -> Optional[dict]:
+    q = link.query
+    tls: Dict[str, Any] = {"alpn": link.alpn or ["h3"]}
+    if link.sni:
+        tls["serverName"] = link.sni
+    if q.get("pinSHA256"):
+        tls["pinnedPeerCertSha256"] = q["pinSHA256"]
+    if q.get("vcn"):
+        tls["verifyPeerCertByName"] = q["vcn"]
+    if q.get("ech"):
+        tls["echConfigList"] = q["ech"]
+    stream = {"network": "hysteria", "hysteriaSettings": {"version": 2, "auth": link.password},
+              "security": "tls", "tlsSettings": tls}
+    mask = _finalmask(q.get("fm", "")) or {}
+    for key, field in (("up", "brutalUp"), ("down", "brutalDown")):
+        if q.get(key):
+            params = mask.setdefault("quicParams", {})
+            if not isinstance(params, dict):
+                return None
+            rate = q[key].strip()
+            # A bare rate in a share link is Mbps. Xray reads bare rates as bps.
+            params.setdefault(field, rate + " mbps" if rate.replace(".", "", 1).isdigit() else rate)
+    if q.get("obfs") or link.ports:
+        udp = mask.setdefault("udp", [])
+        if not isinstance(udp, list):
+            return None
+        if q.get("obfs"):
+            settings = {"password": q["obfs-password"]}
+            if q["obfs"] == "gecko":
+                settings["packetSize"] = "512-1200"
+            udp.append({"type": "salamander", "settings": settings})
+        if link.ports:
+            udp.append({"type": "udphop", "settings": {"mode": "intervallocal,intervalremote",
+                                                       "remotePorts": link.ports, "interval": 30}})
+    if mask:
+        stream["finalmask"] = mask
+    return {"protocol": "hysteria", "settings": {"version": 2, "address": link.server, "port": link.port},
+            "streamSettings": stream}
+
+
 def node_url_to_xray_outbound(url: str) -> Optional[dict]:
-    """The Xray outbound, without a tag, that a vless://, trojan:// or ss:// link describes.
+    """The Xray outbound, without a tag, that a share link describes.
 
     None for a link Xray can't use: another scheme, no server, a transport Xray lacks, or a
     Shadowsocks plugin.
     """
+    url = url.strip()
+    if url.partition("://")[0].lower() in HYSTERIA2_SCHEMES:
+        link = parse_hysteria2(url)
+        return _hysteria2_outbound(link) if link else None
     parsed = _parse(url)
     if parsed is None:
         return None

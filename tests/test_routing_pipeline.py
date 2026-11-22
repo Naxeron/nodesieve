@@ -62,6 +62,16 @@ def test_check_ranks_the_main_pool_into_the_report_and_the_feed(tmp_path):
     assert sorted(path.name for path in tmp_path.iterdir()) == ["routing-report.json"]
 
 
+def test_steer_publishes_hysteria2_and_redacts_its_credentials(tmp_path):
+    config = config_for(tmp_path)
+    node = "hy2://private-password@node.example/?obfs=salamander&obfs-password=private-obfs#Game"
+    assert scan(config, [(node, 5, node)], {node: {"location": location(), "latency_ms": 5}})
+    assert feed_links(config) == [node]
+    report = (tmp_path / "routing-report.json").read_text()
+    assert len(json.loads(report)["main"]["eligible"]) == 1
+    assert all(secret not in report for secret in ("private-password", "node.example", "private-obfs"))
+
+
 def test_nodes_failing_the_location_policy_are_reported_as_exclusions(tmp_path):
     config = config_for(tmp_path)
     nodes, metadata = evidence()

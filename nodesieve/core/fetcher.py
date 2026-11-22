@@ -18,7 +18,8 @@ import aiohttp
 
 from nodesieve.constants import PROJECT_ROOT, SUB_CACHE_DIR
 from nodesieve.logging import ErrorTracker, log
-from nodesieve.parsers.base import extract_host_port
+from nodesieve.parsers.base import extract_host_port, node_key
+from nodesieve.parsers.hysteria2 import HYSTERIA2_SCHEMES, parse_hysteria2
 
 
 def _format_age(seconds: float) -> str:
@@ -42,9 +43,9 @@ class NodeFetcher:
     def __init__(self, config: dict):
         self.config = config
         self.allowed_ports = self._get_allowed_ports()
-        self.supported_protos = ("vless://", "trojan://")
+        self.supported_protos = {"vless", "trojan", *HYSTERIA2_SCHEMES}
         if config.get("routing", {}).get("enabled", False):
-            self.supported_protos += ("ss://",)
+            self.supported_protos.add("ss")
 
     def _get_allowed_ports(self) -> Set[int]:
         ports = {80, 443, 2053, 2083, 2087, 2096, 8443, 2802, 2302, 2502, 25565, 50001}
@@ -94,7 +95,7 @@ class NodeFetcher:
             if port and port not in self.allowed_ports and is_blocked_sni:
                 continue
 
-            core = node.split("#")[0]
+            core = node_key(node)
             if core not in seen_cores:
                 seen_cores.add(core)
                 unique_nodes.append(node)
@@ -179,25 +180,26 @@ class NodeFetcher:
 
     def _parse_subscription(self, sub_content: str) -> List[str]:
         """Decodes base64 if needed, keeps the supported nodes, and applies multiplexing parameter injection."""
-        if not any(proto in sub_content for proto in self.supported_protos):
+        if "://" not in sub_content:
             try:
                 cleaned_b64 = re.sub(r"\s+", "", sub_content)
                 cleaned_b64 = cleaned_b64.replace("-", "+").replace("_", "/")
                 cleaned_b64 += "=" * (-len(cleaned_b64) % 4)
-                decoded = base64.b64decode(cleaned_b64).decode("utf-8", errors="ignore")
-                if any(proto in decoded for proto in self.supported_protos):
-                    sub_content = decoded
+                sub_content = base64.b64decode(cleaned_b64).decode("utf-8", errors="ignore")
             except Exception:
                 pass
 
-        nodes = [
-            line.strip()
-            for line in sub_content.splitlines()
-            if line.strip() and any(line.strip().startswith(p) for p in self.supported_protos)
-        ]
-
         valid_nodes = []
-        for n in nodes:
+        for line in sub_content.splitlines():
+            scheme, sep, rest = line.strip().partition("://")
+            scheme = scheme.lower()
+            if not sep or scheme not in self.supported_protos:
+                continue
+            n = scheme + sep + rest
+            if scheme in HYSTERIA2_SCHEMES:
+                if parse_hysteria2(n):
+                    valid_nodes.append(n)
+                continue
             pbk_match = re.search(r"[?&]pbk=([^&#]+)", n)
             if pbk_match:
                 pbk = pbk_match.group(1).replace("=", "")
