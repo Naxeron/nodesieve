@@ -4,6 +4,7 @@ import copy
 import math
 
 from nodesieve.location import COUNTRIES
+from nodesieve.parsers.base import SHARE_SCHEMES, node_key
 
 
 DEFAULT_ROUTING = {
@@ -140,15 +141,15 @@ def select_main_pool(candidates, metadata, routing):
     for candidate in candidates:
         node = candidate[0] if isinstance(candidate, (tuple, list)) else candidate
         original = candidate[2] if isinstance(candidate, (tuple, list)) and len(candidate) > 2 else node
-        core = node.split("#", 1)[0]
+        core = node_key(node)
         if core in seen:
             continue
         seen.add(core)
         meta = metadata.get(node, metadata.get(original, {}))
         evidence = copy.deepcopy(meta.get("location", {}))
         reason = main_policy_failure(policy, evidence)
-        if not reason and node.split("://", 1)[0] not in {"vless", "trojan", "ss"}:
-            reason = "Proxy URI is unsupported by this exporter (VLESS, Trojan and Shadowsocks only)"
+        if not reason and node.partition("://")[0].lower() not in SHARE_SCHEMES:
+            reason = "Proxy URI is unsupported by this exporter"
         if reason:
             excluded.append({"node": node, "reason": reason})
         else:

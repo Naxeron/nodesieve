@@ -10,7 +10,7 @@ Android, or an OpenWrt router that `install-router` set up.
 [Raw Subscriptions] (a failed or empty download falls back to that subscription's last good copy in sub_cache/)
        │
        ▼
-[Phase 0: TCP Reachability Filter] (raw TCP connect, timeout 1.5s)
+[Phase 0: TCP Reachability Filter] (raw TCP connect, timeout 1.5s, Hysteria 2 proceeds to Phase 1 over QUIC)
        │
        ▼
 [Phase 1: IP Check] (local core instances, Xray or Mihomo, up to 32 nodes each, a listener per node)
@@ -37,7 +37,7 @@ Android, or an OpenWrt router that `install-router` set up.
 
 ### `NodeTester` ↔ `dashboard.py`
 - `class NodeTester`:
-  - `async def async_check_tcp_node(node, timeout=1.5) -> Optional[str]`: Phase 0 TCP reachability.
+  - `async def async_check_tcp_node(node, timeout=1.5) -> Optional[str]`: Phase 0 checks TCP reachability for TCP protocols and passes valid Hysteria 2 nodes to the core for their first network check.
   - `def check_links(node) -> Optional[Tuple[str, Optional[str]]]`: What the IP check needs the local core to serve for a node: the link it is checked with (without multiplexing where `use_mux` applies) and the same node with multiplexing for the probe, or `None` for no probe (Steer, a core other than Mihomo, or no multiplexing). `None` instead of the pair for a node turned away before any core is needed.
   - `async def test_node_full(idx, node, endpoint=None) -> Optional[Tuple[str, float, str]]`: Phase 1 IP check through `endpoint`, the node's listener on a shared core instance, or through an instance of its own when there is none. Returns `(relabelled_node, latency_ms, tested_node)` or `None`; the outcome, including a drop reason, is recorded in `node_metadata`. The node is checked without multiplexing; when `use_mux` applies to it and its server does not answer through sing-mux, or the core is not Mihomo and so can't ask, the relabelled link is marked `smux=0`, which `node_url_to_mihomo_dict` reads as "no multiplexing" for the speedtest and the feed's Clash profile. Before it puts a failure down to the node it calls `ensure_alive()`, which raises `CoreInstanceLost` with `retry` when a shared instance has exited; the node is then to be checked again alone.
   - `def speedtest_links(node)` / `async def speedtest_node(idx, node, timeout, endpoint=None) -> Optional[Tuple[str, float, float]]`: The same for the speedtest. Returns `(relabelled_node, bytes_per_second, location_score)`.
@@ -68,7 +68,7 @@ Android, or an OpenWrt router that `install-router` set up.
 - `steer.write_routing_report(route, config) -> {"ready", "report_path", "servers", "warnings", "errors"}`: Writes the redacted report; `servers` is the ranked list the Steer pipeline publishes to the feed, empty unless `ready`.
 
 ### `feed.py` ↔ `dashboard.py` / `cli.py`
-- `write_feed(nodes, config) -> {"written", "count", "left_out", "directory"}`: Replaces `links.txt`, `links-base64.txt` and `clash.yaml` in the feed directory, each atomically, with the nodes that have a share link (VLESS, Trojan, Shadowsocks), in order and without repeated servers. Files are mode 0600, or 0644 when others may enter the directory (uhttpd serves only world-readable files). With none, nothing is written and the previous feed stays. The profile enables multiplexing only for Mihomo-target scans, as `node_url_to_mihomo_dict` reads each link's `smux` marker; `links.txt` drops the marker.
+- `write_feed(nodes, config) -> {"written", "count", "left_out", "directory"}`: Replaces `links.txt`, `links-base64.txt` and `clash.yaml` in the feed directory, each atomically, with the nodes that have a share link (VLESS, Trojan, Shadowsocks, Hysteria 2), in order and without repeated servers. Files are mode 0600, or 0644 when others may enter the directory (uhttpd serves only world-readable files). With none, nothing is written and the previous feed stays. The profile enables multiplexing only for Mihomo-target scans, as `node_url_to_mihomo_dict` reads each link's `smux` marker; `links.txt` drops the marker.
 - `run_feed_command(config) -> bool | None`: Runs the `feed_command` setting through the shell after `dashboard.publish_feed` wrote a new feed, unless the scan is a dry run. A failure is logged and does not fail the scan.
 - `feed_status(config) -> {"count", "written_at"} | None`: The feed apps get now.
 - `build_app(config, token)` / `serve_feed(config, token, host, port)`: `GET`/`HEAD /<token>/<file>` for the three files with `profile-update-interval` and `profile-title` headers, 503 before the first feed, 404 for anything else. `cli.py` creates `feed_token` on the first `serve` and saves only that, refusing to save over a settings file it cannot read (`ConfigManager.load(strict=True)`).

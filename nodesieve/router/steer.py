@@ -17,6 +17,7 @@ import re
 from urllib.parse import quote, unquote
 
 from nodesieve.files import write_private
+from nodesieve.parsers.base import SHARE_SCHEMES, node_key
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
 from nodesieve.routing import main_location_rank, main_policy_failure, normalize_routing
 
@@ -36,7 +37,7 @@ def _uri(node: str) -> str | None:
     if not isinstance(node, str) or any(ord(c) < 32 or ord(c) == 127 for c in node):
         return None
     core, separator, fragment = node.strip().partition("#")
-    if any(c.isspace() for c in core) or core.split("://", 1)[0] not in {"vless", "trojan", "ss"}:
+    if any(c.isspace() for c in core) or core.partition("://")[0].lower() not in SHARE_SCHEMES:
         return None
     if node_url_to_mihomo_dict(core) is None:
         return None
@@ -87,9 +88,9 @@ def _main_route(route: dict, policy: dict) -> tuple[list[str], dict]:
         uri = _uri(node)
         if reason or uri is None:
             excluded.append({"id": _node_id(node), "reason": _location_reason(reason) if reason else
-                             "Proxy URI is unsupported by this exporter (VLESS, Trojan and Shadowsocks only)"})
+                             "Proxy URI is unsupported by this exporter"})
             continue
-        core = uri.split("#", 1)[0]
+        core = node_key(uri)
         if core in seen:
             continue
         seen.add(core)

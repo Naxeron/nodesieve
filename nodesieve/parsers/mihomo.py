@@ -1,10 +1,12 @@
-"""Converts proxy URI schemes (VLESS, Trojan, Shadowsocks) to Mihomo dictionary definitions."""
+"""Converts share links to Mihomo proxy definitions."""
 
 import base64
 import json
 import re
 import urllib.parse
 from typing import Any, Optional
+
+from nodesieve.parsers.hysteria2 import HYSTERIA2_SCHEMES, Hysteria2Link, parse_hysteria2
 
 # Options in the "extra" JSON of an XHTTP link (Xray's names) and the Mihomo xhttp-opts
 # key each one sets. Where two names set one key, the first one present wins: links
@@ -114,8 +116,34 @@ def _xhttp_opts(path: str, host: str, mode: str, extra: str) -> dict:
     return opts
 
 
+def _hysteria2_proxy(link: Hysteria2Link) -> dict:
+    q = link.query
+    proxy = {"name": link.name or f"hysteria2_{link.server}_{link.port}", "type": "hysteria2",
+             "server": link.server, "port": link.port, "password": link.password, "udp": True}
+    if link.ports:
+        proxy["ports"] = link.ports
+    if link.sni:
+        proxy["sni"] = link.sni
+    if link.alpn:
+        proxy["alpn"] = link.alpn
+    if q.get("insecure", "").lower() in ("1", "true") or q.get("allowInsecure", "").lower() in ("1", "true"):
+        proxy["skip-cert-verify"] = True
+    if q.get("pinSHA256"):
+        proxy["fingerprint"] = q["pinSHA256"]
+    if q.get("vcn"):
+        proxy["name-cert-verify"] = q["vcn"].split(",")[0].strip()
+    if q.get("ech"):
+        proxy["ech-opts"] = {"enable": True, "config": q["ech"]}
+    if q.get("obfs"):
+        proxy.update({"obfs": q["obfs"], "obfs-password": q["obfs-password"]})
+    for key in ("up", "down"):
+        if q.get(key):
+            proxy[key] = q[key]
+    return proxy
+
+
 def node_url_to_mihomo_dict(url: str, use_mux: bool = True) -> Optional[dict]:
-    """Converts a raw vless://, trojan://, or ss:// URL into a Mihomo proxy config dict.
+    """Converts a raw share link into a Mihomo proxy config dict.
 
     use_mux adds sing-mux to nodes that can carry it, unless the link is marked smux=0.
     """
@@ -123,6 +151,9 @@ def node_url_to_mihomo_dict(url: str, use_mux: bool = True) -> Optional[dict]:
         url = url.strip()
         if not url:
             return None
+        if url.partition("://")[0].lower() in HYSTERIA2_SCHEMES:
+            link = parse_hysteria2(url)
+            return _hysteria2_proxy(link) if link else None
 
         # Separate fragment / tag
         name = ""

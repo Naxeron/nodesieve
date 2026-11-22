@@ -5,6 +5,17 @@ import re
 import urllib.parse
 from typing import Optional, Tuple
 
+from nodesieve.parsers.hysteria2 import HYSTERIA2_SCHEMES, parse_hysteria2
+
+SHARE_SCHEMES = frozenset(("vless", "trojan", "ss", *HYSTERIA2_SCHEMES))
+
+
+def node_key(node: str) -> str:
+    """Identify duplicate links across display names and Hysteria 2 scheme aliases."""
+    core = node.partition("#")[0]
+    scheme, _, rest = core.partition("://")
+    return "hysteria2://" + rest if scheme.lower() in HYSTERIA2_SCHEMES else core
+
 
 def get_flag_emoji(country_code: str) -> str:
     """Converts a 2-letter ISO country code into Unicode flag emoji."""
@@ -29,6 +40,8 @@ def extract_node_protocol(node_uri: str) -> str:
         proto = node_uri.split("://", 1)[0].upper()
         if proto == "SHADOWSOCKS":
             return "SS"
+        if proto == "HY2":
+            return "HYSTERIA2"
         return proto
     return "VPN"
 
@@ -88,6 +101,9 @@ def format_descriptive_node_name(
 def extract_host_port(node_uri: str) -> Tuple[Optional[str], Optional[int]]:
     """Extracts server host/IP and integer port from any supported proxy URI scheme."""
     try:
+        if extract_node_protocol(node_uri) == "HYSTERIA2":
+            link = parse_hysteria2(node_uri)
+            return (link.server, link.port) if link else (None, None)
         clean_uri = node_uri.split("#", 1)[0].split("?", 1)[0]
         if "://" not in clean_uri:
             return None, None

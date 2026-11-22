@@ -25,7 +25,6 @@ passwords or keys, and not this computer's own address.
 import argparse
 import asyncio
 import base64
-import copy
 import ipaddress
 import json
 import os
@@ -53,6 +52,8 @@ from nodesieve.core.fetcher import NodeFetcher  # noqa: E402
 from nodesieve.core.batch import PortManager, _accepts, _relays, _serve_ready  # noqa: E402
 from nodesieve.core.mihomo import _log_record, render_batch_config  # noqa: E402
 from nodesieve.core.tester import NodeTester  # noqa: E402
+from nodesieve.parsers.base import node_key  # noqa: E402
+from nodesieve.parsers.hysteria2 import parse_hysteria2  # noqa: E402
 from nodesieve.parsers.mihomo import _XHTTP_EXTRA_OPTIONS, _XHTTP_XMUX_OPTIONS, node_url_to_mihomo_dict  # noqa: E402
 from nodesieve.core.xray import render_xray_config  # noqa: E402
 from nodesieve.parsers.xray import node_url_to_xray_outbound  # noqa: E402
@@ -134,6 +135,14 @@ def parse_link(idx: int, raw: str) -> Optional[Link]:
     if not sep:
         return None
     scheme = {"hy2": "hysteria2", "shadowsocks": "ss"}.get(scheme.lower(), scheme.lower())
+    if scheme == "hysteria2":
+        link = parse_hysteria2(raw)
+        if not link:
+            return None
+        q = dict(link.query)
+        if link.ports:
+            q["mport"] = link.ports
+        return Link(idx, raw, scheme, link.name, link.server, link.port, link.password, q)
     rest, _, fragment = rest.partition("#")
     rest, _, query = rest.partition("?")
     q = {key: values[0] for key, values in urllib.parse.parse_qs(query, keep_blank_values=True).items()}
@@ -154,8 +163,6 @@ def parse_link(idx: int, raw: str) -> Optional[Link]:
     match = re.match(r"^(\d+)", port_text)
     if not host or not match:
         return None
-    if port_text != match.group(1) and scheme == "hysteria2":
-        q.setdefault("mport", port_text)
     user = urllib.parse.unquote(userinfo)
     if scheme == "ss" and ":" not in user:
         try:
@@ -291,25 +298,12 @@ class MihomoProfile(Profile):
     def convert(self, link: Link, tag: str) -> Tuple[Any, List[str]]:
         notes: List[str] = []
         q = link.q
-        if link.scheme == "hysteria2":
-            proxy: Dict[str, Any] = {"name": tag, "type": "hysteria2", "server": link.host, "port": link.port,
-                                     "password": link.user, "udp": True}
-            if _sni(link):
-                proxy["sni"] = _sni(link)
-            if _insecure(link):
-                proxy["skip-cert-verify"] = True
-            if _alpn(link):
-                proxy["alpn"] = _alpn(link)
-            if q.get("obfs"):
-                proxy["obfs"] = q["obfs"]
-                proxy["obfs-password"] = q.get("obfs-password", "")
-            if q.get("mport"):
-                proxy["ports"] = q["mport"]
-            return proxy, notes + _congestion_note(link) + ["nodesieve does not fetch Hysteria 2 links"]
         proxy = node_url_to_mihomo_dict(NodeTester._as_checked(link.raw), use_mux=False)
         if not proxy:
             raise Unsupported(f"nodesieve converts no Mihomo proxy from {link.scheme} links")
         proxy["name"] = tag
+        if link.scheme == "hysteria2":
+            return proxy, _congestion_note(link)
         if link.fragments:
             notes.append("ClientHello not fragmented (Mihomo cannot)")
         if link.network == "grpc" and q.get("authority") and q["authority"] != _sni(link):
@@ -356,119 +350,20 @@ class XrayProfile(Profile):
     version_args = ("version",)
 
     def convert(self, link: Link, tag: str) -> Tuple[Any, List[str]]:
+        outbound = node_url_to_xray_outbound(NodeTester._as_checked(link.raw))
+        if outbound is None:
+            raise Unsupported(f"nodesieve converts no Xray outbound from this {link.scheme} link")
         notes: List[str] = []
-        q = link.q
-        finalmask = copy.deepcopy(link.finalmask)
-        if not self.options.get("fragment", True) and link.fragments:
-            finalmask["tcp"] = [m for m in finalmask["tcp"] if not (isinstance(m, dict) and m.get("type") == "fragment")]
-            if not finalmask["tcp"]:
-                del finalmask["tcp"]
+        stream = outbound.get("streamSettings") or {}
+        if not self.options.get("fragment", True) and link.fragments and "finalmask" in stream:
+            mask = stream["finalmask"]
+            mask["tcp"] = [item for item in mask["tcp"] if not (isinstance(item, dict) and item.get("type") == "fragment")]
+            if not mask["tcp"]:
+                del mask["tcp"]
+            if not mask:
+                del stream["finalmask"]
             notes.append("ClientHello fragmenting left out")
-        if link.scheme == "hysteria2":
-            stream: Dict[str, Any] = {"network": "hysteria", "hysteriaSettings": {"version": 2, "auth": link.user},
-                                      "security": "tls", "tlsSettings": self._tls(link, ["h3"])}
-            if q.get("obfs") == "salamander":
-                finalmask.setdefault("udp", []).append(
-                    {"type": "salamander", "settings": {"password": q.get("obfs-password", "")}})
-            elif q.get("obfs"):
-                raise Unsupported(f"Hysteria 2 obfs {q['obfs']}")
-            if q.get("mport"):
-                finalmask.setdefault("quicParams", {}).setdefault("udpHop", {"ports": q["mport"]})
-            if finalmask:
-                stream["finalmask"] = finalmask
-            return {"tag": tag, "protocol": "hysteria", "streamSettings": stream,
-                    "settings": {"version": 2, "address": link.host, "port": link.port}}, notes
-        if link.scheme in ("vless", "trojan", "ss"):
-            # What nodesieve itself runs, as for Mihomo.
-            outbound = node_url_to_xray_outbound(NodeTester._as_checked(link.raw))
-            if outbound is None:
-                raise Unsupported(f"nodesieve converts no Xray outbound from this {link.scheme} link")
-            stream = outbound.get("streamSettings") or {}
-            if not self.options.get("fragment", True) and "finalmask" in stream:
-                if finalmask:
-                    stream["finalmask"] = finalmask
-                else:
-                    del stream["finalmask"]
-            return {**outbound, "tag": tag}, notes
-        if link.scheme == "vless":
-            protocol = "vless"
-            settings: Dict[str, Any] = {"address": link.host, "port": link.port, "id": link.user,
-                                        "encryption": q.get("encryption") or "none"}
-            if q.get("flow"):
-                settings["flow"] = q["flow"]
-        elif link.scheme == "trojan":
-            protocol = "trojan"
-            settings = {"servers": [{"address": link.host, "port": link.port, "password": link.user}]}
-        elif link.scheme == "ss":
-            method, _, password = link.user.partition(":")
-            protocol = "shadowsocks"
-            settings = {"servers": [{"address": link.host, "port": link.port, "method": method, "password": password}]}
-        else:
-            raise Unsupported(f"{link.scheme} links")
-
-        host, path = q.get("host") or "", q.get("path") or "/"
-        net = link.network
-        if net in ("tcp", "raw"):
-            if q.get("headerType") == "http":
-                raise Unsupported("TCP with an HTTP header")
-            stream = {"network": "tcp"}
-        elif net in ("ws", "websocket"):
-            stream = {"network": "ws", "wsSettings": {"path": path, "host": host or _sni(link)}}
-        elif net == "grpc":
-            grpc = {"serviceName": q.get("serviceName", ""), "multiMode": q.get("mode") == "multi"}
-            if q.get("authority"):
-                grpc["authority"] = q["authority"]
-            stream = {"network": "grpc", "grpcSettings": grpc}
-        elif net in ("xhttp", "splithttp"):
-            xhttp: Dict[str, Any] = {"path": path, "mode": q.get("mode") or "auto"}
-            if host:
-                xhttp["host"] = host
-            if q.get("extra"):
-                try:
-                    xhttp["extra"] = json.loads(q["extra"])
-                except ValueError:
-                    notes.append("XHTTP extra unreadable")
-            stream = {"network": "xhttp", "xhttpSettings": xhttp}
-        elif net == "httpupgrade":
-            stream = {"network": "httpupgrade", "httpupgradeSettings": {"path": path, "host": host or _sni(link)}}
-        else:
-            raise Unsupported(f"{net} transport")
-
-        if link.security == "reality":
-            reality = {"serverName": _sni(link), "fingerprint": q.get("fp") or "chrome",
-                       "publicKey": q.get("pbk", ""), "shortId": q.get("sid", "")}
-            if q.get("spx"):
-                reality["spiderX"] = q["spx"]
-            if q.get("pqv"):
-                reality["mldsa65Verify"] = q["pqv"]
-            stream.update(security="reality", realitySettings=reality)
-        elif link.security == "tls":
-            stream.update(security="tls", tlsSettings=self._tls(link, []))
-        elif link.security != "none":
-            raise Unsupported(f"security {link.security}")
-        if finalmask:
-            stream["finalmask"] = finalmask
-        return {"tag": tag, "protocol": protocol, "settings": settings, "streamSettings": stream}, notes
-
-    @staticmethod
-    def _tls(link: Link, default_alpn: List[str]) -> dict:
-        q = link.q
-        tls: Dict[str, Any] = {}
-        if _sni(link):
-            tls["serverName"] = _sni(link)
-        if q.get("fp"):
-            tls["fingerprint"] = q["fp"]
-        if _alpn(link) or default_alpn:
-            tls["alpn"] = _alpn(link) or default_alpn
-        if _insecure(link):
-            tls["allowInsecure"] = True
-        if q.get("vcn"):
-            tls["verifyPeerCertByName"] = q["vcn"]
-        if q.get("pcs"):
-            tls["pinnedPeerCertSha256"] = q["pcs"]
-        if q.get("ech"):
-            tls["echConfigList"] = q["ech"]
-        return tls
+        return {**outbound, "tag": tag}, notes
 
     def render(self, entries: Sequence[Entry], ready_target: int, ready_port: int) -> str:
         # nodesieve's own configuration, logging each connection for the per-node errors.
@@ -510,6 +405,8 @@ class SingBoxProfile(Profile):
         if link.scheme == "hysteria2":
             out: Dict[str, Any] = {"type": "hysteria2", "tag": tag, "server": link.host, "server_port": link.port,
                                    "password": link.user, "tls": self._tls(link, ["h3"], utls=False)}
+            if q.get("pinSHA256"):
+                out["tls"]["certificate_sha256"] = [base64.b64encode(bytes.fromhex(q["pinSHA256"])).decode("ascii")]
             if q.get("obfs") == "salamander":
                 out["obfs"] = {"type": "salamander", "password": q.get("obfs-password", "")}
             elif q.get("obfs"):
@@ -866,7 +763,7 @@ async def speed_once(port: int, seconds: float, size: int) -> dict:
 
 
 async def tcp_reachable(links: Sequence[Link], timeout: float = 1.5) -> Dict[int, bool]:
-    """nodesieve's Phase 0 for each node: a TCP connection to its server."""
+    """Phase 0 TCP results for the nodes that use TCP."""
 
     async def one(link: Link) -> Tuple[int, bool]:
         try:
@@ -880,7 +777,7 @@ async def tcp_reachable(links: Sequence[Link], timeout: float = 1.5) -> Dict[int
             pass
         return link.idx, True
 
-    return dict(await asyncio.gather(*(one(link) for link in links)))
+    return dict(await asyncio.gather(*(one(link) for link in links if link.scheme != "hysteria2")))
 
 
 # --- The run ---------------------------------------------------------------------------
@@ -985,7 +882,7 @@ async def run(args: argparse.Namespace) -> dict:
     seen = set()
     unparsed = 0
     for raw in raw_links:
-        core = raw.split("#", 1)[0]
+        core = node_key(raw)
         if core in seen:
             continue
         seen.add(core)
@@ -1006,7 +903,7 @@ async def run(args: argparse.Namespace) -> dict:
     real_ip = await direct_ip()
     tcp = await tcp_reachable(links)
     print(f"[*] Direct trace {'answered' if real_ip else 'did not answer'}; "
-          f"{sum(tcp.values())} of {len(links)} servers accept TCP (nodesieve's Phase 0)")
+          f"{sum(tcp.values())} of {len(tcp)} TCP-based servers accept connections")
 
     plans: List[Plan] = []
     for profile in build_profiles(args):
@@ -1170,13 +1067,14 @@ def report(result: dict, args: argparse.Namespace) -> Tuple[str, dict]:
                 if len({plan.works(link.idx) for plan in plans if plan.works(link.idx) is not None}) > 1
                 or any(plan.works(link.idx) is None for plan in plans)]
     out += ["", "## Where the cores differ", "",
-            "Rounds a node answered in; — where the core does not serve it. TCP: nodesieve's Phase 0 reaches the server.", "",
+            "Rounds in which the node answered. The TCP column shows the phase 0 result for TCP-based nodes.", "",
             "| # | node | type | TCP | " + " | ".join(plan.profile.name for plan in plans) + " |",
             "|---|---|---|---|" + "---|" * len(plans)]
     for idx in disagree:
         link = by_idx[idx]
         cells = ["—" if plan.works(idx) is None else f"{plan.works(idx)}/{rounds}" for plan in plans]
-        out.append(f"| {idx} | {_cell(link.name)} | {link.kind} | {'yes' if result['tcp'].get(idx) else 'no'} | " + " | ".join(cells) + " |")
+        tcp_result = {True: "yes", False: "no", None: "—"}[result["tcp"].get(idx)]
+        out.append(f"| {idx} | {_cell(link.name)} | {link.kind} | {tcp_result} | " + " | ".join(cells) + " |")
     details = []
     for idx in disagree:
         lines = []

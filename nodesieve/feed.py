@@ -32,6 +32,7 @@ import yaml
 from nodesieve.constants import DEFAULT_CONFIG, GOOGLE_HEALTHCHECK_URL, PROJECT_ROOT
 from nodesieve.files import write_private
 from nodesieve.logging import log
+from nodesieve.parsers.base import SHARE_SCHEMES, node_key
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
 
 FEED_DIR = "feed"
@@ -40,8 +41,6 @@ BASE64_NAME = "links-base64.txt"
 CLASH_NAME = "clash.yaml"
 FEED_FILES = (LINKS_NAME, BASE64_NAME, CLASH_NAME)
 
-# The link types nodesieve tests and other apps import.
-SCHEMES = {"vless", "trojan", "ss"}
 SELECT_GROUP = "nodesieve"
 AUTO_GROUP = "Auto"
 # Names Mihomo resolves to its own policies or to the profile's groups; no proxy may take them.
@@ -75,7 +74,7 @@ def _share_link(node: object) -> Optional[str]:
     if not isinstance(node, str) or any(ord(c) < 32 or ord(c) == 127 for c in node):
         return None
     core, separator, fragment = node.strip().partition("#")
-    if any(c.isspace() for c in core) or core.split("://", 1)[0] not in SCHEMES:
+    if any(c.isspace() for c in core) or core.partition("://")[0].lower() not in SHARE_SCHEMES:
         return None
     return _without_mux_marker(core) + ("#" + quote(unquote(fragment), safe="") if separator else "")
 
@@ -95,7 +94,7 @@ def _entries(nodes: Iterable, use_mux: bool) -> tuple[list[tuple[str, dict]], in
         if proxy is None:
             left_out += 1
             continue
-        core = link.split("#", 1)[0]
+        core = node_key(link)
         if core not in seen:
             seen.add(core)
             entries.append((link, proxy))
