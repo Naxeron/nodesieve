@@ -22,6 +22,10 @@
 /mihomo
 /mihomo.exe
 
+# Xray binary
+/xray
+/xray.exe
+
 # Local scratch: sample nodes and pre-refactoring backups
 /node.txt
 /test_node.yaml
