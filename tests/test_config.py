@@ -32,6 +32,16 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(loaded["allowed_countries"], ["US", "DE"])
             self.assertFalse(loaded["use_mux"])
 
+    def test_min_speed_percent_round_trip_and_invalid_values(self):
+        default = DEFAULT_CONFIG["min_speed_percent"]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_file = os.path.join(tmp_dir, "config.json")
+            for value, expected in [("62.5", 62.5), (0, 0), (100, 100), (-1, default), (101, default),
+                                    ("nan", default), ("invalid", default), (True, default), (None, default)]:
+                with self.subTest(value=value):
+                    ConfigManager.save({"min_speed_percent": value}, cfg_file)
+                    self.assertEqual(ConfigManager.load(cfg_file)["min_speed_percent"], expected)
+
     def test_load_with_trailing_commas(self):
         """ConfigManager.load seamlessly parses JSON with human-written trailing commas."""
         with tempfile.TemporaryDirectory() as tmp_dir:

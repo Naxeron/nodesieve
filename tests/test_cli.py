@@ -174,6 +174,9 @@ class TestCLI(unittest.TestCase):
             ["--tcp-workers", "-10"],
             ["--speedtest-timeout", "0"],
             ["--speedtest-timeout", "-3"],
+            ["--min-speed-percent", "-1"],
+            ["--min-speed-percent", "101"],
+            ["--min-speed-percent", "nan"],
         ]:
             with self.assertRaises(SystemExit) as cm:
                 main(cmd)

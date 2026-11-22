@@ -33,6 +33,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "tcp_workers": 128,
     "allowed_countries": [],
     "speedtest_timeout": 45,
+    "min_speed_percent": 50,
     "ip_mode": "off",
     "use_mux": True,
     "mem_per_worker": 8,

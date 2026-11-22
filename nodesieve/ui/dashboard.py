@@ -1,12 +1,14 @@
 """Coordinates a scan: fetch the subscriptions, check and rank the nodes, publish them to the feed."""
 
 import asyncio
+import math
 import re
 import time
 from typing import Any, List, Optional, Tuple
 import aiohttp
 
 from nodesieve.config import ConfigManager
+from nodesieve.constants import DEFAULT_CONFIG
 from nodesieve.core.fetcher import NodeFetcher
 from nodesieve.core.limits import ResourceLimits
 from nodesieve.core.batch import NodeEndpoint, run_in_batches, setup_core
@@ -230,8 +232,8 @@ class VPNDashboard:
     async def run_pipeline_async(self, dry_run: bool = False) -> bool:
         """Scan: fetch, check and rank the nodes, then publish them to the subscription feed.
 
-        A Steer scan ranks by location (run_routing_pipeline_async); any other by exit
-        country and speed, keeping the 30 fastest. With dry_run, feed_command doesn't run.
+        A Steer scan ranks by location. A Mihomo-target scan keeps up to 30 ranked
+        nodes after applying the speed cutoff. With dry_run, feed_command doesn't run.
         """
         if self.config.get("routing", {}).get("enabled", False):
             return await self.run_routing_pipeline_async(dry_run)
@@ -243,14 +245,21 @@ class VPNDashboard:
             return False
 
         speed_tested = await self.run_speedtest_nodes_async(candidates, tester)
-        final_nodes: List[str] = []
-        if speed_tested:
-            final_nodes = [n for n, speed_bps, _ in speed_tested[:30] if speed_bps > 0]
-            if not final_nodes:
-                final_nodes = [n for n, _, _ in speed_tested[:30]]
+        measured = [(node, speed) for node, speed, _ in speed_tested if math.isfinite(speed) and speed > 0]
+        if measured:
+            fastest = max(speed for _, speed in measured)
+            percent = self.config.get("min_speed_percent", DEFAULT_CONFIG["min_speed_percent"])
+            min_fraction = percent / 100
+            eligible = [node for node, speed in measured if speed / fastest >= min_fraction]
+            log.info(f"[*] Speed cutoff {percent:g}% of the fastest node ({fastest / 1024**2:.2f} MB/s). "
+                     f"Kept {len(eligible)} of {len(measured)} measured nodes.")
+            final_nodes = eligible[:30]
         else:
-            for cand in candidates[:30]:
-                final_nodes.append(cand[0] if isinstance(cand, (tuple, list)) and len(cand) > 0 else str(cand))
+            log.warning("[!] No usable speed measurements. Selecting IP-verified nodes in latency order.")
+            final_nodes = [
+                cand[0] if isinstance(cand, (tuple, list)) and cand else str(cand)
+                for cand in candidates[:30]
+            ]
         log.info(f"[+] Scan complete: {len(final_nodes)} top verified nodes.")
         return self.publish_feed(final_nodes, run_command=not dry_run)
 

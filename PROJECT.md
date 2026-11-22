@@ -24,7 +24,7 @@ Android, or an OpenWrt router that `install-router` set up.
        ├──────────────► Steer target: select_main_pool: every qualifying node, ranked by agreement,
        │                reports, latency; steer-output/routing-report.json, without credentials
        ▼ (Mihomo target)
-[Phase 2: Speedtest] (throughput of the working nodes; the 30 fastest are kept)
+[Phase 2: Speedtest] (keep nodes reaching min_speed_percent of the fastest, then take up to 30 in rank order)
        │
        ▼
 [Subscription Feed] (feed/: share links, the same in base64, a Clash/Mihomo profile)

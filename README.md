@@ -224,8 +224,15 @@ once, through one instance.
 
 ### Mihomo target
 
-After the IP check, the working nodes are speed-tested, and the 30 fastest go to the
-[subscription feed](#subscription-feed).
+After the IP check, nodesieve measures each working node's download speed. By default
+a node must reach at least **50% of the fastest speed in that scan**. If the fastest
+downloads at 20 MB/s, nodes at 10 MB/s or above qualify. Up to 30 qualifying nodes
+go to the [subscription feed](#subscription-feed) in rank order.
+
+Set `min_speed_percent` in `nodesieve_config.json`, or use
+`python -m nodesieve check --min-speed-percent 75` for one scan. A value of `0`
+disables the cutoff and `100` keeps only nodes tied for fastest. If every speedtest
+fails, the scan falls back to the first 30 IP-verified nodes in latency order.
 
 ## Subscription feed
 
@@ -240,8 +247,8 @@ with any of them:
 | `links-base64.txt` | The same list, base64-encoded | Apps that read only that |
 | `clash.yaml` | A complete Clash/Mihomo profile | Clash Meta for Android, FlClash and other Clash apps |
 
-The feed holds the scan's result, in its order: the 30 fastest working nodes for the
-Mihomo target, the ranked main pool for Steer. The profile's `Auto` group uses the first
+The feed holds up to 30 nodes in rank order for the Mihomo target, or the ranked
+main pool for Steer. The profile's `Auto` group uses the first
 node in that order that answers, and the `nodesieve` group in front of it lets you pick
 a node by hand. Multiplexing is on only for nodes whose server answered through it in
 the scan. The feed accepts VLESS, Trojan, Shadowsocks and Hysteria 2 links.

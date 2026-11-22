@@ -10,7 +10,7 @@ import sys
 from typing import List, Optional
 
 from nodesieve.config import ConfigManager
-from nodesieve.constants import CORES, CRASHED_LOG_FILE, PROJECT_ROOT
+from nodesieve.constants import CORES, CRASHED_LOG_FILE, DEFAULT_CONFIG, PROJECT_ROOT
 from nodesieve.feed import new_token, serve_feed, valid_token
 from nodesieve.logging import log
 from nodesieve.router.install import SCAN_HOURS, install_router
@@ -85,6 +85,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="speedtest_timeout",
         type=int,
         help="Timeout in seconds for speedtesting each candidate node.",
+    )
+    parser.add_argument(
+        "--min-speed-percent",
+        type=float,
+        metavar="PERCENT",
+        help="Minimum download speed as a percentage of the fastest node in this Mihomo-target scan "
+             f"(0 to 100, default {DEFAULT_CONFIG['min_speed_percent']}). Use 0 to disable the cutoff.",
     )
     parser.add_argument(
         "--core",
@@ -408,6 +415,12 @@ def main(argv: Optional[List[str]] = None) -> None:
             log.error("[-] Speedtest timeout must be a positive integer.")
             sys.exit(1)
         config["speedtest_timeout"] = args.speedtest_timeout
+
+    if args.min_speed_percent is not None:
+        if not 0 <= args.min_speed_percent <= 100:
+            log.error("[-] --min-speed-percent must be between 0 and 100.")
+            sys.exit(1)
+        config["min_speed_percent"] = args.min_speed_percent
 
     if args.router_host is not None:
         host_val = args.router_host.strip()

@@ -244,14 +244,43 @@ def test_server_hands_out_each_new_scan_without_a_restart(tmp_path):
 
 # Scans
 
-def test_mihomo_check_publishes_the_deployed_nodes_fastest_first(tmp_path):
-    dashboard = VPNDashboard({**feed_config(tmp_path)})
-    verified = [(TROJAN, 9.0, TROJAN), (VLESS, 5.0, VLESS)]
-    measured = [(VLESS, 2e6, 0.0), (TROJAN, 1e6, 0.0)]
+@pytest.mark.parametrize("settings,expected", [
+    ({}, [VLESS_SHARED, HYSTERIA, TROJAN]),
+    ({"min_speed_percent": 0}, [VLESS_SHARED, HYSTERIA, TROJAN, SS]),
+    ({"min_speed_percent": 100}, [VLESS_SHARED, HYSTERIA]),
+])
+def test_mihomo_check_publishes_nodes_meeting_the_speed_cutoff_fastest_first(tmp_path, settings, expected):
+    dashboard = VPNDashboard(feed_config(tmp_path, **settings))
+    verified = [(node, 5.0, node) for node in (SS, TROJAN, VLESS, HYSTERIA)]
+    measured = [(VLESS, 2e6, 0.0), (HYSTERIA, 2e6, 0.0), (TROJAN, 1e6, 0.0), (SS, 999_999, 0.0)]
     with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(verified, None))), \
             patch.object(dashboard, "run_speedtest_nodes_async", AsyncMock(return_value=measured)):
         assert asyncio.run(dashboard.run_pipeline_async())
-    assert read(tmp_path, LINKS_NAME) == VLESS_SHARED + "\n" + TROJAN + "\n"
+    assert read(tmp_path, LINKS_NAME).splitlines() == expected
+
+
+def test_speed_cutoff_uses_the_fastest_measurement_before_limiting_the_location_ranked_feed(tmp_path):
+    slow = [f"trojan://pass@slow{i}.example:443" for i in range(30)]
+    fast = [f"trojan://pass@fast{i}.example:443" for i in range(30)]
+    # The highest location score comes first. The fastest nodes are all below the first 30.
+    measured = [(SS, 1_510_000, 1.0)] + [(node, 1_250_000, 1.0) for node in slow]
+    measured.extend((node, 2_000_000, 0.9) for node in fast)
+    verified = [(node, 5.0, node) for node, _, _ in measured]
+    path = settings_file(tmp_path, **feed_config(tmp_path), allowed_countries=["DE"], min_speed_percent=0)
+    with patch.object(VPNDashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(verified, None))), \
+            patch.object(VPNDashboard, "run_speedtest_nodes_async", AsyncMock(return_value=measured)):
+        cli_module.main(["check", "--config-file", str(path), "--min-speed-percent", "75.5"])
+    assert read(tmp_path, LINKS_NAME).splitlines() == [SS, *fast[:29]]
+    assert json.loads(path.read_text())["min_speed_percent"] == 0
+
+
+def test_mihomo_check_uses_verified_nodes_when_every_speedtest_fails(tmp_path):
+    dashboard = VPNDashboard(feed_config(tmp_path))
+    verified = [(SS, 5.0, SS), (TROJAN, 9.0, TROJAN)]
+    with patch.object(dashboard, "fetch_and_verify_candidates_async", AsyncMock(return_value=(verified, None))), \
+            patch.object(dashboard, "run_speedtest_nodes_async", AsyncMock(return_value=[])):
+        assert asyncio.run(dashboard.run_pipeline_async())
+    assert read(tmp_path, LINKS_NAME).splitlines() == [SS, TROJAN]
 
 
 def test_scan_without_survivors_keeps_the_feed_and_says_so(tmp_path, caplog):

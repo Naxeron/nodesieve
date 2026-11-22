@@ -75,6 +75,15 @@ class ConfigManager:
         except (ValueError, TypeError):
             config["speedtest_timeout"] = 45
 
+        speed_percent = config.get("min_speed_percent")
+        try:
+            percent = float(speed_percent)
+            if isinstance(speed_percent, bool) or not 0 <= percent <= 100:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            percent = DEFAULT_CONFIG["min_speed_percent"]
+        config["min_speed_percent"] = percent
+
         try:
             config["tcp_workers"] = int(config.get("tcp_workers", 128))
         except (ValueError, TypeError):
