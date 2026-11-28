@@ -120,6 +120,11 @@ class TestSubscriptionCache(unittest.TestCase):
 
     def test_newer_fetch_replaces_cache(self):
         self.fetch(_Response(200, _payload(NODE_A)))
+        cache_path = os.path.join(self.cache_dir, self.cache_files()[0])
+        inode_before = os.stat(cache_path).st_ino
+        # Identical payload skips rewriting the cache file.
+        self.fetch(_Response(200, _payload(NODE_A)))
+        self.assertEqual(os.stat(cache_path).st_ino, inode_before)
         self.fetch(_Response(200, _payload(NODE_B, NODE_C)))
         self.assertEqual(len(self.cache_files()), 1)
         self.assertEqual(self.fetch(FAILURES["timeout"]), [NODE_B, NODE_C])

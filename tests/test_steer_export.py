@@ -73,6 +73,13 @@ def test_unsupported_or_malformed_uri_cannot_make_empty_pool_ready(tmp_path, nod
     assert not result["ready"] and result["servers"] == []
 
 
+def test_steer_accepts_xray_only_links_rejected_by_mihomo_parser(tmp_path):
+    # Xray supports trailing slash after authority on VLESS with httpupgrade; Mihomo's parser returns None.
+    httpupgrade = "vless://11111111-1111-4111-8111-111111111111@192.0.2.10:443/?type=httpupgrade&security=tls&sni=example.org#HU"
+    result = export(main_route(httpupgrade), config(tmp_path))
+    assert result["ready"] and result["servers"] == [httpupgrade]
+
+
 def test_missing_route_and_policy_drift_refuse_export(tmp_path):
     options = config(tmp_path)
     for missing in ({}, None):

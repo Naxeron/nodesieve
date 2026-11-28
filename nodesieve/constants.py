@@ -42,6 +42,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # directory, and the server `serve` runs. feed_token, the secret part of the feed's
     # address, is created by the first `serve`.
     "feed_dir": "",
+    "feed_formats": ["links", "base64", "clash"],
     "feed_host": "127.0.0.1",
     "feed_port": 9876,
     "feed_token": "",

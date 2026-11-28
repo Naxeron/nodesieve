@@ -259,9 +259,37 @@ def test_ip2location_without_its_token_is_no_vote():
 
 
 def test_a_node_without_any_exit_address_fails():
-    result = probe(FakeNode(**{"ipv4.icanhazip.com": (502, "")}), families=())
+    node = FakeNode(**{"ipv4.icanhazip.com": (502, "")})
+    result = probe(node, families=())
     assert (result["status"], result["reason"]) == ("failed", "No exit address answered through the proxy")
     assert result["tested_families"] == []
+    # Dead nodes do not fire MaxMind, ip2location, or Cloudflare requests.
+    assert node.urls("maxmind.com") == []
+    assert node.urls("ip2location.com") == []
+    assert node.urls("www.cloudflare.com") == []
+
+
+def test_cloudflare_starts_before_slow_ipv6_discovery_finishes():
+    events = []
+    release_v6 = asyncio.Event()
+
+    class SlowV6Node(FakeNode):
+        async def request(self, method, url, headers=None, data=None):
+            if any(host in url for host in ("ipv6.", "api6.")):
+                await release_v6.wait()
+                raise aiohttp.ClientConnectionError("no ipv6")
+            if "www.cloudflare.com" in url:
+                events.append("cloudflare")
+                release_v6.set()
+            return await super().request(method, url, headers=headers, data=data)
+
+    async def run():
+        return await asyncio.wait_for(location.query_providers(SlowV6Node()), timeout=2.0)
+
+    reports_, exits = asyncio.run(run())
+    assert exits == {"ipv4": IPV4}
+    assert events == ["cloudflare"]
+    assert any(r["provider"] == "Cloudflare" and r["country"] == "DE" for r in reports_)
 
 
 def test_a_probe_that_stalls_fails_in_time():

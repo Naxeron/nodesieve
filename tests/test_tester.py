@@ -128,6 +128,153 @@ class TestNodeTester(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_speedtest_excludes_warmup_and_teardown_and_uses_100mb_payload(self):
+        async def run():
+            node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#Warmup"
+            mock_runner = AsyncMock()
+            mock_runner.proxy_url = "http://127.0.0.1:12345"
+            mock_runner.port = 12345
+
+            clock = [0.0]
+            chunk_data = b"0" * 131072  # 128 KiB
+
+            class RampStream:
+                async def iter_chunked(self, size):
+                    # First chunk sets t=0.0; slow-start chunks span warmup (0.5 s).
+                    yield chunk_data
+                    clock[0] = 0.25
+                    yield chunk_data
+                    clock[0] = 0.50
+                    yield chunk_data
+                    # Steady state: 160 chunks (20 MiB) over exactly 1.0 s -> 20 MiB/s.
+                    for i in range(1, 161):
+                        clock[0] = 0.50 + i / 160.0
+                        yield chunk_data
+
+            class SlowCloseContext:
+                def __init__(self, response):
+                    self.response = response
+
+                async def __aenter__(self):
+                    return self.response
+
+                async def __aexit__(self, *args):
+                    # Simulate 0.5 s connection teardown after transfer finishes.
+                    clock[0] += 0.50
+
+            mock_resp = MagicMock(status=200, content=RampStream())
+            mock_session = MagicMock()
+            mock_session.get.return_value = SlowCloseContext(mock_resp)
+
+            class MockSessionContext:
+                async def __aenter__(self):
+                    return mock_session
+
+                async def __aexit__(self, *args):
+                    pass
+
+            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
+                    patch("aiohttp.ClientSession", return_value=MockSessionContext()), \
+                    patch("nodesieve.core.tester.time.perf_counter", side_effect=lambda: clock[0]):
+                MockRunner.return_value.__aenter__.return_value = mock_runner
+                res = await self.tester.speedtest_node(1, node, timeout=45)
+
+            self.assertIsNotNone(res)
+            _, speed_bps, _ = res
+            self.assertAlmostEqual(speed_bps / 1024 / 1024, 20.0, delta=0.1)
+            called_url = mock_session.get.call_args.args[0]
+            self.assertEqual(called_url, "https://speed.cloudflare.com/__down?bytes=100000000")
+            self.assertEqual(mock_session.get.call_args.kwargs["timeout"].sock_read, 4.0)
+
+        asyncio.run(run())
+
+    def test_speedtest_early_stops_after_steady_state_sample(self):
+        async def run():
+            node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#Fast"
+            mock_runner = AsyncMock()
+            mock_runner.proxy_url = "http://127.0.0.1:12345"
+            mock_runner.port = 12345
+
+            clock = [0.0]
+            chunk_data = b"0" * 131072  # 128 KiB
+
+            class InfiniteFastStream:
+                async def iter_chunked(self, size):
+                    # 25 MiB/s: 128 KiB every 0.005 s.
+                    yield chunk_data
+                    while True:
+                        clock[0] += 0.005
+                        yield chunk_data
+
+            mock_resp = MagicMock(status=200, content=InfiniteFastStream())
+            mock_session = MagicMock()
+            mock_session.get.return_value = MockRequestContext(mock_resp)
+
+            class MockSessionContext:
+                async def __aenter__(self):
+                    return mock_session
+
+                async def __aexit__(self, *args):
+                    pass
+
+            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
+                    patch("aiohttp.ClientSession", return_value=MockSessionContext()), \
+                    patch("nodesieve.core.tester.time.perf_counter", side_effect=lambda: clock[0]):
+                MockRunner.return_value.__aenter__.return_value = mock_runner
+                res = await self.tester.speedtest_node(1, node, timeout=45)
+
+            self.assertIsNotNone(res)
+            _, speed_bps, _ = res
+            self.assertAlmostEqual(speed_bps / 1024 / 1024, 25.0, delta=0.2)
+            # 0.5 s warmup + 2.5 s steady-state early stop, well before 6.0 s cap.
+            self.assertLess(clock[0], 3.5)
+
+        asyncio.run(run())
+
+    def test_speedtest_penalizes_mid_stream_stall_and_checks_core_liveness(self):
+        async def run():
+            node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#Stall"
+            mock_runner = AsyncMock()
+            mock_runner.proxy_url = "http://127.0.0.1:12345"
+            mock_runner.port = 12345
+
+            clock = [0.0]
+            chunk_data = b"0" * 131072  # 128 KiB
+
+            class StallingStream:
+                async def iter_chunked(self, size):
+                    yield chunk_data
+                    for _ in range(4):  # 512 KiB in 0.2 s, then hangs for 4.0 s
+                        clock[0] += 0.05
+                        yield chunk_data
+                    clock[0] += 4.0
+                    raise asyncio.TimeoutError()
+
+            mock_resp = MagicMock(status=200, content=StallingStream())
+            mock_session = MagicMock()
+            mock_session.get.return_value = MockRequestContext(mock_resp)
+
+            class MockSessionContext:
+                async def __aenter__(self):
+                    return mock_session
+
+                async def __aexit__(self, *args):
+                    pass
+
+            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
+                    patch("aiohttp.ClientSession", return_value=MockSessionContext()), \
+                    patch("nodesieve.core.tester.time.perf_counter", side_effect=lambda: clock[0]):
+                MockRunner.return_value.__aenter__.return_value = mock_runner
+                res = await self.tester.speedtest_node(1, node, timeout=45)
+
+            self.assertIsNotNone(res)
+            _, speed_bps, _ = res
+            # 512 KiB over 4.2 s (~0.12 MiB/s), not over 0.2 s (~2.5 MiB/s).
+            self.assertAlmostEqual(speed_bps / 1024 / 1024, 0.5 / 4.2, delta=0.02)
+            mock_runner.ensure_alive.assert_awaited()
+
+        asyncio.run(run())
+
     def test_test_node_full_dead_node_aborts_immediately(self):
         async def run():
             node = "vless://uuid@1.2.3.4:443#DeadNode"

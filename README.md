@@ -11,43 +11,60 @@ Nodesieve can also rank the feed by location agreement for Steer's main section 
 
 ## Running on the router
 
-Start with a checkout on writable storage on the router. If the router has Git and
-HTTPS access to the repository, `git clone https://github.com/Naxeron/nodesieve /opt/nodesieve`
-creates the directory used below. Allow about 150 MB for Python, its dependencies and
-the proxy core. Install the packages from the router's shell with its package manager.
+Start with a shallow checkout on writable storage on the router. If the router has Git and
+HTTPS access to the repository, `git clone --depth 1 https://github.com/Naxeron/nodesieve /opt/nodesieve`
+creates the directory used below. Install `python3-aiohttp` from the router's package
+manager (`python3-yaml` is only needed if you use Mihomo or `clash.yaml`):
 
-- **opkg** — `opkg update && opkg install python3 python3-aiohttp python3-yaml`
-- **apk** — `apk add python3 python3-aiohttp python3-yaml`
+- **opkg** — `opkg update && opkg install python3-aiohttp` (add `python3-yaml` for Mihomo / `clash.yaml`)
+- **apk** — `apk add python3-aiohttp` (add `python3-yaml` for Mihomo / `clash.yaml`)
 
-Add a subscription, run the first scan, then serve the results.
+If the router already has a compatible `xray` binary (e.g. from Zapret Manager / Steer),
+symlink it into `/opt/nodesieve/xray` to avoid downloading a second copy.
+
+For OpenWrt routers that already run `uhttpd` (including Zapret Manager LuCI), you don't
+need to keep `python3 -m nodesieve serve` running in RAM. Serve a token-protected
+directory through `uhttpd` directly:
+
+```sh
+TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')
+mkdir -p "/www/nodesieve/$TOKEN"
+chmod 711 /www/nodesieve "/www/nodesieve/$TOKEN"
+: > /www/nodesieve/index.html && chmod 644 /www/nodesieve/index.html
+echo "http://127.0.0.1/nodesieve/$TOKEN/links.txt"
+```
+
+Configure `nodesieve_config.json` with `"feed_dir": "/www/nodesieve/<token>"`,
+`"feed_formats": ["links"]` (to write only `links.txt`), `"use_mux": false`, and
+`"feed_command": "/opt/zapret-manager-luci/backend.sh steer_action sub_refresh x"`
+(which runs only when the ranked server list or order actually changes). Add your
+subscription and run the first scan:
 
 ```sh
 cd /opt/nodesieve
 python3 -m nodesieve --add-sub "https://example.org/your-subscription"
 python3 -m nodesieve check
-python3 -m nodesieve serve
 ```
 
-`check` is the default action. Use the full option names or short flags shown by
-`--help`. `serve` runs in the foreground and prints feed URLs
-on `127.0.0.1:9876` for apps on the router. To serve LAN clients, use `--feed-host`
-with the router's LAN address. If uhttpd already serves your configured `feed_dir`,
-each scan updates the files at their existing URLs.
+If you prefer not to use `uhttpd`, `python3 -m nodesieve serve` serves the feed in the
+foreground on `127.0.0.1:9876` (use `--feed-host` with the router's LAN address for LAN
+clients). `check` is the default action; use `--help` for all flags.
 
-For Steer, enable main-pool ranking with `python3 -m nodesieve routing` before scanning.
 In Zapret Manager's Steer connection tab, subscribe the main section to the `links.txt`
-URL. To refresh Steer after each feed update, set `feed_command` in
-`nodesieve_config.json` to `/opt/zapret-manager-luci/backend.sh steer_action sub_refresh x`.
+URL. By default `check` ranks nodes by speed (Mihomo target); to rank by 16-provider
+GeoIP location agreement instead, enable Steer routing with `python3 -m nodesieve routing`
+before scanning (and optionally set `"routing_output_dir": "/tmp/nodesieve-report"` to keep
+the report off flash).
 
-With `flock` installed, add this entry with `crontab -e` to scan every six hours.
-It skips the run if the previous scheduled scan is still active.
+With `flock` installed, add this entry with `crontab -e` to scan every six hours at low
+CPU priority without overlapping runs:
 
 ```cron
-0 */6 * * * cd /opt/nodesieve && flock -n /var/lock/nodesieve.lock sh -c 'python3 -m nodesieve check > /tmp/nodesieve.log 2>&1'
+17 */6 * * * cd /opt/nodesieve && PATH=/usr/sbin:/usr/bin:/sbin:/bin flock -n /var/lock/nodesieve.lock sh -c 'nice -n 10 python3 -m nodesieve check > /tmp/nodesieve.log 2>&1'
 ```
 
 Enable and start cron with `/etc/init.d/cron enable` and `/etc/init.d/cron start`.
-A Mihomo-target scan can download up to 25 MB per node that passes the IP check.
+A Mihomo-target scan can download up to 100 MB per node that passes the IP check.
 
 ## Setup
 
@@ -228,8 +245,9 @@ counts 8 MB for each node (`mem_per_worker`) and 24 MB for each instance, and le
 500 MB free. It runs one instance for every 32 nodes plus one, so that a new batch can
 start while the last nodes of another are still being checked. A router with 1 GB of
 RAM, about 790 MB of it available, checks 30 nodes at once through two instances.
-`workers` (or `--workers`) sets a lower number. The speedtest measures up to 8 nodes at
-once, through one instance.
+`workers` (or `--workers`) sets a lower number. The speedtest measures nodes one at a
+time so they don't compete for the same connection, while still sharing one instance
+across up to 32 nodes.
 
 - **A node the core refuses.** Xray and Mihomo refuse a whole configuration over one
   proxy they can't use. Such a node is set aside with the core's reason, shown with its
@@ -296,11 +314,14 @@ setting of their own.
   you, unless `feed_dir` is a directory others may enter, as a web server's must be,
   and git ignores `feed/`. To change the address, clear `feed_token` and restart
   `serve`; subscribed apps then need the new one.
-- **Elsewhere.** `feed_dir` writes the feed to another directory; a relative path is
-  taken from the project directory.
-- **After a scan.** `feed_command` is a shell command run after each scan that updated
-  the feed, except with `--dry-run`, for example to have an app fetch it right away.
-  If it fails, the scan says so, and its result stands.
+- **Elsewhere & formats.** `feed_dir` writes the feed to another directory; a relative
+  path is taken from the project directory. `feed_formats` selects which files to write
+  (`["links", "base64", "clash"]` by default; e.g. `["links"]` when only Steer subscribes
+  to `links.txt`, which also avoids needing `PyYAML`).
+- **After a scan.** `feed_command` is a shell command run after each scan that changed
+  the feed's ordered servers (ignoring display-name stats), except with `--dry-run`, for
+  example to have an app fetch it right away. If it fails, the scan says so, and its
+  result stands.
 
 ## Steer main pool
 

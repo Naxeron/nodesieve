@@ -19,27 +19,34 @@ import asyncio
 import base64
 from datetime import datetime
 import hmac
+import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import subprocess
 from typing import Iterable, Optional
 from urllib.parse import quote, unquote
 
 from aiohttp import web
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None  # Only needed when writing clash.yaml.
 
 from nodesieve.constants import DEFAULT_CONFIG, GOOGLE_HEALTHCHECK_URL, PROJECT_ROOT
 from nodesieve.files import write_private
 from nodesieve.logging import log
 from nodesieve.parsers.base import SHARE_SCHEMES, node_key
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
+from nodesieve.parsers.xray import node_url_to_xray_outbound
 
 FEED_DIR = "feed"
 LINKS_NAME = "links.txt"
 BASE64_NAME = "links-base64.txt"
 CLASH_NAME = "clash.yaml"
 FEED_FILES = (LINKS_NAME, BASE64_NAME, CLASH_NAME)
+FEED_FORMATS = ("links", "base64", "clash")
 
 SELECT_GROUP = "nodesieve"
 AUTO_GROUP = "Auto"
@@ -79,19 +86,36 @@ def _share_link(node: object) -> Optional[str]:
     return _without_mux_marker(core) + ("#" + quote(unquote(fragment), safe="") if separator else "")
 
 
-def _entries(nodes: Iterable, use_mux: bool) -> tuple[list[tuple[str, dict]], int]:
-    """(share link, Mihomo proxy) of each node, in order and without repeats, and how many were left out.
+def _feed_formats(config: dict) -> set[str]:
+    """Which feed files to write: any subset of links, base64, clash; all three by default."""
+    configured = config.get("feed_formats")
+    if isinstance(configured, (list, tuple, set)):
+        selected = {str(item).strip().lower() for item in configured if isinstance(item, str)} & set(FEED_FORMATS)
+        if selected:
+            return selected
+    return set(FEED_FORMATS)
 
-    A link of another kind, or one Mihomo can't read, stays out.
+
+def _entries(
+    nodes: Iterable, use_mux: bool, include_clash: bool = True,
+) -> tuple[list[tuple[str, Optional[dict]]], int]:
+    """(share link, Mihomo proxy or None) of each node, in order and without repeats, and how many were left out.
+
+    A link that neither Xray nor Mihomo can read stays out.
     """
-    entries: list[tuple[str, dict]] = []
+    entries: list[tuple[str, Optional[dict]]] = []
     seen: set[str] = set()
     left_out = 0
     for node in nodes:
         link = _share_link(node)
+        if not link:
+            left_out += 1
+            continue
+        raw = node.strip()
+        xray_ok = node_url_to_xray_outbound(raw) is not None
         # The proxy comes from the node as tested, so its smux marker still applies.
-        proxy = node_url_to_mihomo_dict(node.strip(), use_mux=use_mux) if link else None
-        if proxy is None:
+        proxy = node_url_to_mihomo_dict(raw, use_mux=use_mux) if (include_clash or not xray_ok) else None
+        if not xray_ok and proxy is None:
             left_out += 1
             continue
         core = node_key(link)
@@ -107,6 +131,8 @@ def clash_profile(proxies: list[dict]) -> str:
     The fallback group uses the first proxy that answers, so the scan's ranking decides,
     and the select group in front of it lets a node be picked by hand.
     """
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to build clash.yaml (install PyYAML or python3-yaml).")
     proxies = [dict(proxy) for proxy in proxies]
     used = set(_RESERVED_NAMES)
     for proxy in proxies:
@@ -133,13 +159,30 @@ def clash_profile(proxies: list[dict]) -> str:
         profile, allow_unicode=True, sort_keys=False)
 
 
+def _write_if_changed(path: Path, text: str, mode: int) -> None:
+    """Write text atomically unless path already has identical bytes and permissions."""
+    encoded = text.encode("utf-8")
+    try:
+        st = path.stat()
+        if (os.name == "nt" or stat.S_IMODE(st.st_mode) == mode) and path.read_bytes() == encoded:
+            return
+    except OSError:
+        pass
+    write_private(path, text, mode)
+
+
 def write_feed(nodes: Iterable, config: dict) -> dict:
     """Replace the feed with the nodes that have a share link; with none, leave the feed as it is.
 
     Steer scans don't check multiplexing, so their profile never turns it on.
     """
+    formats = _feed_formats(config)
+    want_clash = "clash" in formats
+    if want_clash and yaml is None:
+        log.warning("[!] PyYAML is not installed; skipping clash.yaml in the subscription feed.")
+        want_clash = False
     use_mux = bool(config.get("use_mux", True)) and not config.get("routing", {}).get("enabled", False)
-    entries, left_out = _entries(nodes, use_mux)
+    entries, left_out = _entries(nodes, use_mux, include_clash=want_clash)
     directory = feed_directory(config)
     result = {"written": False, "count": len(entries), "left_out": left_out, "directory": str(directory)}
     if not entries:
@@ -149,11 +192,35 @@ def write_feed(nodes: Iterable, config: dict) -> dict:
     # lets others in, as a web server's does: uhttpd serves only files that anyone may read.
     mode = 0o644 if directory.stat().st_mode & 0o001 else 0o600
     links = "".join(link + "\n" for link, _ in entries)
-    write_private(directory / CLASH_NAME, clash_profile([proxy for _, proxy in entries]), mode)
-    write_private(directory / BASE64_NAME, base64.b64encode(links.encode("utf-8")).decode("ascii"), mode)
-    write_private(directory / LINKS_NAME, links, mode)
-    result["written"] = True
+    wrote_any = False
+    if want_clash:
+        proxies = [proxy for _, proxy in entries if proxy is not None]
+        if proxies:
+            _write_if_changed(directory / CLASH_NAME, clash_profile(proxies), mode)
+            wrote_any = True
+    if "base64" in formats:
+        _write_if_changed(directory / BASE64_NAME, base64.b64encode(links.encode("utf-8")).decode("ascii"), mode)
+        wrote_any = True
+    if "links" in formats:
+        _write_if_changed(directory / LINKS_NAME, links, mode)
+        wrote_any = True
+    result["written"] = wrote_any
     return result
+
+
+def feed_server_keys(config: dict) -> Optional[list[str]]:
+    """Ordered server keys (ignoring display names) currently in the feed, or None without one."""
+    directory = feed_directory(config)
+    text: Optional[str] = None
+    try:
+        text = (directory / LINKS_NAME).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        try:
+            encoded = (directory / BASE64_NAME).read_text(encoding="ascii").strip()
+            text = base64.b64decode(encoded).decode("utf-8")
+        except (OSError, ValueError, UnicodeDecodeError):
+            return None
+    return [node_key(line.strip()) for line in text.splitlines() if line.strip()]
 
 
 def run_feed_command(config: dict, timeout: float = 120.0) -> Optional[bool]:

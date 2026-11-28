@@ -39,6 +39,8 @@ class TestConfigManager(unittest.TestCase):
             "router_host": "router.example", "router_ssh_port": 22, "router_ssh_user": "root",
             "router_ssh_pass": "old-password", "router_ssh_key_path": "/old/key",
             "router_api_port": 9090, "router_proxy_port": 7890, "enable_router_validation": True,
+            "use_warp_scanner": True, "warp_private_key": "secret-key", "warp_ipv6": "fd00::1",
+            "use_amnezia_wg": True, "amnezia_wg_conf": "US.conf", "use_warp_chaining": True,
         }
         local = {"subscriptions": ["https://example.com/sub"], "feed_dir": "/www/nodesieve/example",
                  "routing_output_dir": "reports", "workers": 4}
@@ -52,6 +54,20 @@ class TestConfigManager(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(legacy.keys().isdisjoint(saved))
             self.assertEqual({key: saved[key] for key in local}, local)
+
+    def test_feed_formats_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_file = os.path.join(tmp_dir, "config.json")
+            for raw, expected in [
+                (["links"], ["links"]),
+                (["LINKS", "base64", "links", "unknown"], ["links", "base64"]),
+                ([], ["links", "base64", "clash"]),
+                (["unknown"], ["links", "base64", "clash"]),
+                ("links", ["links", "base64", "clash"]),
+            ]:
+                with self.subTest(raw=raw):
+                    ConfigManager.save({"feed_formats": raw}, cfg_file)
+                    self.assertEqual(ConfigManager.load(cfg_file)["feed_formats"], expected)
 
     def test_min_speed_percent_round_trip_and_invalid_values(self):
         default = DEFAULT_CONFIG["min_speed_percent"]

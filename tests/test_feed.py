@@ -282,6 +282,31 @@ def test_mihomo_check_uses_verified_nodes_when_every_speedtest_fails(tmp_path):
     assert read(tmp_path, LINKS_NAME).splitlines() == [SS, TROJAN]
 
 
+def test_speedtest_phase_runs_sequentially_with_shared_core_batches(tmp_path):
+    from nodesieve.core.tester import NodeTester
+
+    dashboard = VPNDashboard(feed_config(tmp_path, workers=64))
+    tester = NodeTester(dashboard.config, total_nodes=50)
+    candidates = [(VLESS, 10.0, VLESS), (TROJAN, 20.0, TROJAN), (SS, 30.0, SS)]
+    captured = {}
+
+    async def fake_run_in_batches(jobs, links, check, on_result, **kwargs):
+        captured["jobs"] = list(jobs)
+        captured["kwargs"] = kwargs
+        for idx, node in jobs:
+            on_result(idx, node, (node, float(idx * 1_000_000), 0.0))
+
+    with patch("nodesieve.ui.dashboard.setup_core"), \
+            patch("nodesieve.ui.dashboard.run_in_batches", side_effect=fake_run_in_batches):
+        results = asyncio.run(dashboard.run_speedtest_nodes_async(candidates, tester=tester))
+
+    assert captured["kwargs"]["workers"] == 1
+    assert captured["kwargs"]["nodes_per_instance"] == 3
+    assert captured["kwargs"]["total_nodes"] == 3
+    assert tester.total_nodes == 3
+    assert [node for node, _, _ in results] == [SS, TROJAN, VLESS]
+
+
 def test_scan_without_survivors_keeps_the_feed_and_says_so(tmp_path, caplog):
     config = feed_config(tmp_path)
     write_feed([VLESS, TROJAN], config)
@@ -334,6 +359,40 @@ def test_feed_command_follows_each_scan_that_updates_the_feed(tmp_path, dry_run,
             patch.object(dashboard, "run_speedtest_nodes_async", AsyncMock(return_value=[(TROJAN, 1e6, 0.0)])):
         asyncio.run(dashboard.run_pipeline_async(dry_run=dry_run))
     assert (marker.read_text().count("ran") if marker.exists() else 0) == runs
+
+
+def test_feed_formats_writes_only_selected_files_and_skips_unchanged_writes(tmp_path):
+    config = feed_config(tmp_path, feed_formats=["links"])
+    result = write_feed([VLESS, TROJAN], config)
+    assert result["written"] and result["count"] == 2
+    assert sorted(p.name for p in (tmp_path / "feed").iterdir()) == [LINKS_NAME]
+    links_path = tmp_path / "feed" / LINKS_NAME
+    inode_before = links_path.stat().st_ino
+    assert write_feed([VLESS, TROJAN], config)["written"]
+    assert links_path.stat().st_ino == inode_before
+
+
+def test_feed_skips_clash_profile_when_pyyaml_is_unavailable(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(feed_module, "yaml", None)
+    config = feed_config(tmp_path)
+    result = write_feed([VLESS], config)
+    assert result["written"] and result["count"] == 1
+    assert sorted(p.name for p in (tmp_path / "feed").iterdir()) == sorted([LINKS_NAME, BASE64_NAME])
+    assert "PyYAML is not installed" in caplog.text
+    assert not write_feed([VLESS], feed_config(tmp_path, feed_formats=["clash"]))["written"]
+
+
+def test_feed_command_skips_when_server_order_is_unchanged(tmp_path):
+    marker = tmp_path / "ran"
+    config = {**feed_config(tmp_path), "feed_command": f"echo ran >> '{marker}'"}
+    write_feed([VLESS + "1", TROJAN + "1"], config)
+    dashboard = VPNDashboard(config)
+    # Same servers in same order, only display names changed (e.g. fresh speed measurements).
+    assert dashboard.publish_feed([VLESS + "2", TROJAN + "2"])
+    assert not marker.exists()
+    # Reordering servers triggers feed_command.
+    assert dashboard.publish_feed([TROJAN + "2", VLESS + "2"])
+    assert marker.read_text().count("ran") == 1
 
 
 def test_check_fails_when_the_feed_cannot_be_written(tmp_path, caplog):

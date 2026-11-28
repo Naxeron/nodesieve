@@ -136,10 +136,17 @@ class NodeFetcher:
         return os.path.join(self.cache_dir, hashlib.sha256(url.encode("utf-8")).hexdigest()[:16] + ".json")
 
     def _save_cache(self, url: str, sub_content: str) -> None:
-        """Keeps a good payload for later fallback. A failed write is reported and never fails the fetch."""
-        entry = {"url": url, "fetched_at": int(time.time()), "content": sub_content}
+        """Keeps a good payload for later fallback, skipping disk writes when unchanged."""
         try:
             path = self._cache_path(url)
+            try:
+                with open(path, encoding="utf-8") as existing:
+                    cached = json.load(existing)
+                if isinstance(cached, dict) and cached.get("url") == url and cached.get("content") == sub_content:
+                    return
+            except (OSError, ValueError):
+                pass
+            entry = {"url": url, "fetched_at": int(time.time()), "content": sub_content}
             os.makedirs(self.cache_dir, mode=0o700, exist_ok=True)
             # mkstemp creates the file readable by this user only; the payload holds proxy credentials.
             # Writing a temporary file and renaming it means a crash never leaves a truncated cache.

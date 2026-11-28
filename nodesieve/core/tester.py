@@ -25,6 +25,18 @@ from nodesieve.location import probe_location
 TRACE_URL_IPV4 = "https://1.1.1.1/cdn-cgi/trace"
 TRACE_URL_IPV6 = "https://[2606:4700:4700::1111]/cdn-cgi/trace"
 
+# Speedtest payloads and sampling bounds.
+SPEEDTEST_URLS = (
+    "https://speed.cloudflare.com/__down?bytes=100000000",
+    "http://proof.ovh.net/files/100Mb.dat",
+)
+SPEEDTEST_MAX_DURATION = 6.0
+SPEEDTEST_WARMUP_SECONDS = 0.5
+SPEEDTEST_MIN_STEADY_DURATION = 0.25
+SPEEDTEST_EARLY_STOP_STEADY_SECONDS = 2.5
+SPEEDTEST_EARLY_STOP_STEADY_BYTES = 20 * 1024 * 1024
+SPEEDTEST_MIN_BYTES = 65536
+
 
 class NodeTester:
     """Runs the IP check (reachability, exit IP, location) and speedtests against candidate VPN proxy nodes."""
@@ -474,43 +486,76 @@ class NodeTester:
                         except Exception:
                             pass
 
-                    test_urls = [
-                        "https://speed.cloudflare.com/__down?bytes=25000000",
-                        "http://proof.ovh.net/files/100Mb.dat",
-                    ]
-
-                    max_duration = min(float(timeout), 6.0)
-                    for test_url in test_urls:
+                    max_duration = min(float(timeout), SPEEDTEST_MAX_DURATION)
+                    warmup = min(SPEEDTEST_WARMUP_SECONDS, max_duration * 0.25)
+                    for test_url in SPEEDTEST_URLS:
                         first_byte_time = None
-                        total_bytes = 0
+                        last_byte_time = None
+                        bytes_after_first = 0
+                        steady_start = None
+                        steady_bytes = 0
+                        errored = False
                         try:
-                            req_timeout = aiohttp.ClientTimeout(total=max_duration + 3.0, connect=3.5)
+                            req_timeout = aiohttp.ClientTimeout(
+                                total=max_duration + 3.0, connect=3.5, sock_read=4.0,
+                            )
                             async with session.get(test_url, proxy=proxy_url, timeout=req_timeout) as resp:
                                 if resp.status == 200:
                                     async for chunk in resp.content.iter_chunked(131072):
+                                        now = time.perf_counter()
                                         if first_byte_time is None:
-                                            first_byte_time = time.perf_counter()
-                                        total_bytes += len(chunk)
-                                        download_elapsed = time.perf_counter() - first_byte_time
+                                            first_byte_time = now
+                                            last_byte_time = now
+                                            continue
+                                        bytes_after_first += len(chunk)
+                                        last_byte_time = now
+                                        download_elapsed = now - first_byte_time
+
+                                        if steady_start is None:
+                                            if download_elapsed >= warmup:
+                                                steady_start = now
+                                        else:
+                                            steady_bytes += len(chunk)
 
                                         if download_elapsed >= max_duration:
                                             break
 
                                         # Abort early on crawling transfers after 2 seconds
-                                        if download_elapsed > 2.0 and (total_bytes / download_elapsed / 1024 / 1024) < 0.05:
+                                        if (
+                                            download_elapsed > 2.0
+                                            and (bytes_after_first / download_elapsed / 1024 / 1024) < 0.05
+                                        ):
                                             break
 
-                                        # Sufficient sample size obtained for high speed nodes
-                                        if download_elapsed >= 3.0 and total_bytes >= 15 * 1024 * 1024:
+                                        # Sufficient steady-state sample obtained for fast nodes
+                                        if (
+                                            steady_start is not None
+                                            and (now - steady_start) >= SPEEDTEST_EARLY_STOP_STEADY_SECONDS
+                                            and steady_bytes >= SPEEDTEST_EARLY_STOP_STEADY_BYTES
+                                        ):
                                             break
                         except Exception as e:
+                            errored = True
                             ErrorTracker.record_error("Speedtest", e)
-                            pass
 
-                        if first_byte_time and total_bytes >= 65536:
-                            transfer_duration = time.perf_counter() - first_byte_time
+                        if errored:
+                            await runner.ensure_alive()
+
+                        end_time = (
+                            last_byte_time
+                            if not errored and last_byte_time is not None
+                            else time.perf_counter()
+                        )
+                        if steady_start is not None and steady_bytes >= SPEEDTEST_MIN_BYTES:
+                            steady_duration = end_time - steady_start
+                            if steady_duration >= SPEEDTEST_MIN_STEADY_DURATION:
+                                speed_bps = steady_bytes / steady_duration
+                                break
+
+                        if first_byte_time is not None and bytes_after_first >= SPEEDTEST_MIN_BYTES:
+                            transfer_duration = end_time - first_byte_time
                             if transfer_duration > 0.05:
-                                speed_bps = total_bytes / transfer_duration
+                                speed_bps = bytes_after_first / transfer_duration
                                 break
 
                     if speed_bps > 0 and allowed_countries and self.config.get("enable_loc_ranking", False):

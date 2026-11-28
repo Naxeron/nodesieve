@@ -462,6 +462,55 @@ def test_scan_hands_on_a_result_for_a_check_that_raised(monkeypatch):
     assert sorted(delivered) == [(1, 1), (2, None)]
 
 
+def test_scan_runs_sequentially_through_shared_instances(monkeypatch):
+    monkeypatch.setattr(core_batch, "CoreBatch", _Batch)
+    monkeypatch.setattr(_Batch, "sizes", [])
+    monkeypatch.setattr(_Batch, "peak", 0)
+    checking = {"now": 0, "peak": 0}
+    order = []
+
+    async def check(idx, node, endpoint):
+        checking["now"] += 1
+        checking["peak"] = max(checking["peak"], checking["now"])
+        await asyncio.sleep(0.001)
+        order.append(idx)
+        checking["now"] -= 1
+        return idx
+
+    delivered = []
+    jobs = [(idx, f"node{idx}") for idx in range(1, 41)]
+    asyncio.run(run_in_batches(jobs, lambda node: (node, None), check,
+                               lambda idx, node, result: delivered.append(result),
+                               config={}, workers=1, nodes_per_instance=32))
+    assert delivered == list(range(1, 41))
+    assert order == list(range(1, 41))
+    assert checking["peak"] == 1
+    assert _Batch.peak == 1 and _Batch.sizes == [32, 8]
+
+
+def test_sequential_shared_instance_crash_retries_only_affected_job_alone(monkeypatch):
+    monkeypatch.setattr(core_batch, "CoreBatch", _Batch)
+    monkeypatch.setattr(_Batch, "sizes", [])
+    monkeypatch.setattr(_Batch, "peak", 0)
+    calls = []
+
+    async def check(idx, node, endpoint):
+        calls.append(idx)
+        if idx == 2 and calls.count(2) == 1:
+            raise CoreInstanceLost("crashed", retry=True)
+        return idx
+
+    delivered = []
+    jobs = [(idx, f"node{idx}") for idx in range(1, 5)]
+    asyncio.run(run_in_batches(jobs, lambda node: (node, None), check,
+                               lambda idx, node, result: delivered.append(result),
+                               config={}, workers=1, nodes_per_instance=4))
+    assert delivered == [1, 2, 3, 4]
+    # Shared batch of 4 crashes on job 2 -> job 2 retries alone, jobs 3 and 4 share a fresh batch of 2.
+    assert _Batch.sizes == [4, 1, 2]
+    assert calls == [1, 2, 2, 3, 4]
+
+
 @pytest.mark.parametrize("workers, plan", [
     (1, (1, 2)), (8, (8, 2)), (29, (29, 2)), (32, (32, 2)), (33, (32, 3)), (64, (32, 3)), (256, (32, 9)),
 ])

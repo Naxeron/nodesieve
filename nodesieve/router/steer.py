@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote
 from nodesieve.files import write_private
 from nodesieve.parsers.base import SHARE_SCHEMES, node_key
 from nodesieve.parsers.mihomo import node_url_to_mihomo_dict
+from nodesieve.parsers.xray import node_url_to_xray_outbound
 from nodesieve.routing import main_location_rank, main_policy_failure, normalize_routing
 
 OUTPUT_DIR = "steer-output"
@@ -39,7 +40,7 @@ def _uri(node: str) -> str | None:
     core, separator, fragment = node.strip().partition("#")
     if any(c.isspace() for c in core) or core.partition("://")[0].lower() not in SHARE_SCHEMES:
         return None
-    if node_url_to_mihomo_dict(core) is None:
+    if node_url_to_xray_outbound(core) is None and node_url_to_mihomo_dict(core) is None:
         return None
     return core + ("#" + quote(unquote(fragment), safe="") if separator else "")
 

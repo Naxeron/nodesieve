@@ -9,6 +9,7 @@ a time. What differs between the cores is in core/xray.py and core/mihomo.py.
 
 import asyncio
 import ipaddress
+import math
 import os
 import socket
 import tempfile
@@ -26,7 +27,6 @@ from nodesieve.constants import (
 )
 from nodesieve.core.base import LISTEN_HOST, ProxyCore
 from nodesieve.core.limits import ResourceLimits
-from nodesieve.core.mihomo import MihomoCore
 from nodesieve.core.xray import XrayCore
 from nodesieve.logging import ErrorTracker, log, safe_close_writer, safe_print
 from nodesieve.parsers.base import extract_host_port, get_node_name
@@ -40,12 +40,16 @@ _READY_PROXY = "nodesieve-ready"
 _READY_PROBE = b"nodesieve: relaying?\n"
 _READY_TOKEN = b"nodesieve: the core relays\n"
 
-CORES: Dict[str, ProxyCore] = {core.name: core for core in (XrayCore(), MihomoCore())}
+CORES: Dict[str, ProxyCore] = {"xray": XrayCore()}
 
 
 def core_for(config: Optional[dict]) -> ProxyCore:
     """The core the `core` setting names; the default one for a setting nodesieve doesn't know."""
     name = str((config or {}).get("core") or DEFAULT_CONFIG["core"]).strip().lower()
+    if name == "mihomo" and name not in CORES:
+        from nodesieve.core.mihomo import MihomoCore
+
+        CORES["mihomo"] = MihomoCore()
     return CORES.get(name) or CORES[DEFAULT_CONFIG["core"]]
 
 
@@ -647,6 +651,7 @@ async def run_in_batches(
     total_nodes: int = 0,
     temp_prefix: str = "core_",
     error_context: str = "Worker",
+    nodes_per_instance: Optional[int] = None,
 ) -> None:
     """Checks every (idx, node) job through shared local core instances, `workers` nodes at a time.
 
@@ -655,12 +660,18 @@ async def run_in_batches(
     any core is needed; its check runs with no endpoint. check(idx, node, endpoint) runs
     once per job and on_result(idx, node, result) receives the result, None if check raised.
 
-    Consecutive jobs share an instance, up to ResourceLimits.NODES_PER_INSTANCE of them. When
+    Consecutive jobs share an instance, up to ResourceLimits.NODES_PER_INSTANCE of them (or
+    `nodes_per_instance` when given, letting e.g. sequential checks share one instance). When
     an instance exits mid-check, each job whose check noticed (CoreInstanceLost with retry)
     is checked again with an instance of its own, so a node that crashes the core is found.
     """
     workers = max(1, int(workers))
     per_instance, max_instances = ResourceLimits.core_instances(workers)
+    if nodes_per_instance is not None:
+        per_instance = max(1, int(nodes_per_instance))
+    bounded = per_instance > workers
+    if nodes_per_instance is not None:
+        max_instances = 1 if bounded else math.ceil(workers / per_instance) + 1
     node_slots = asyncio.Semaphore(workers)
     instance_slots = asyncio.Semaphore(max_instances)
     core = core_for(config)
@@ -692,38 +703,55 @@ async def run_in_batches(
     async def run_batch(batch: List[Tuple[int, str, Tuple[str, Optional[str]], bool]]) -> None:
         unfinished = list(batch)
         lost: List[Tuple[int, str, Tuple[str, Optional[str]], bool]] = []
+        requeue: List[Tuple[int, str, Tuple[str, Optional[str]], bool]] = []
         exits: List[str] = []
         try:
             nodes = [BatchNode(served[0], served[1], idx, total_nodes) for idx, _, served, _ in batch]
             async with CoreBatch(nodes, config, temp_prefix) as instance:
 
                 async def run_job(job, endpoint: NodeEndpoint) -> None:
-                    try:
-                        if await finish(job[0], job[1], endpoint):
-                            lost.append(job)
-                    finally:
-                        unfinished.remove(job)
-                        node_slots.release()
+                    if bounded:
+                        async with node_slots:
+                            if lost:
+                                requeue.append(job)
+                                unfinished.remove(job)
+                                return
+                            try:
+                                if await finish(job[0], job[1], endpoint):
+                                    lost.append(job)
+                            finally:
+                                unfinished.remove(job)
+                    else:
+                        try:
+                            if await finish(job[0], job[1], endpoint):
+                                lost.append(job)
+                        finally:
+                            unfinished.remove(job)
+                            node_slots.release()
 
                 await asyncio.gather(*(run_job(job, endpoint) for job, endpoint in zip(batch, instance.endpoints)))
                 if lost:
                     exits = instance.exited()
+            if requeue:
+                for item in reversed(requeue):
+                    pending.appendleft(item)
+            if lost:
+                reason = "; ".join(exits) or "exited"
+                ErrorTracker.record_error(f"{core.display} Instance", RuntimeError(reason))
+                safe_print(f"[!] A {core.display} serving {len(batch)} nodes {reason}; checking {len(lost)} of them "
+                           f"again, each with a {core.display} of its own.")
+                for idx, node, served, _ in reversed(lost):
+                    pending.appendleft((idx, node, served, True))
         except Exception as exc:
             # No instance to check these through: they fail as a check that raised does.
             ErrorTracker.record_error(error_context, exc)
             for idx, node, _, _ in unfinished:
                 deliver(idx, node, None)
         finally:
-            for _ in unfinished:
-                node_slots.release()
+            if not bounded:
+                for _ in unfinished:
+                    node_slots.release()
             instance_slots.release()
-        if lost:
-            reason = "; ".join(exits) or "exited"
-            ErrorTracker.record_error(f"{core.display} Instance", RuntimeError(reason))
-            safe_print(f"[!] A {core.display} serving {len(batch)} nodes {reason}; checking {len(lost)} of them "
-                       f"again, each with a {core.display} of its own.")
-            for idx, node, served, _ in reversed(lost):
-                pending.appendleft((idx, node, served, True))
 
     for idx, node in jobs:
         try:
@@ -741,14 +769,19 @@ async def run_in_batches(
                 await asyncio.wait(set(running), return_when=asyncio.FIRST_COMPLETED)
                 continue
             await instance_slots.acquire()
-            await node_slots.acquire()
-            batch = [pending.popleft()]
-            # A batch takes the jobs that have a slot now; an instance whose last nodes are
-            # still being checked does not hold back the next one.
-            while (not batch[0][3] and len(batch) < per_instance and pending and not pending[0][3]
-                   and not node_slots.locked()):
+            if bounded:
+                batch = [pending.popleft()]
+                while not batch[0][3] and len(batch) < per_instance and pending and not pending[0][3]:
+                    batch.append(pending.popleft())
+            else:
                 await node_slots.acquire()
-                batch.append(pending.popleft())
+                batch = [pending.popleft()]
+                # A batch takes the jobs that have a slot now; an instance whose last nodes are
+                # still being checked does not hold back the next one.
+                while (not batch[0][3] and len(batch) < per_instance and pending and not pending[0][3]
+                       and not node_slots.locked()):
+                    await node_slots.acquire()
+                    batch.append(pending.popleft())
             task = asyncio.create_task(run_batch(batch))
             running.add(task)
             task.add_done_callback(running.discard)

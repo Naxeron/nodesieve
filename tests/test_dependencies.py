@@ -63,6 +63,33 @@ def test_nodesieve_runs_without_psutil():
     assert "--feed-host" in finished.stdout
 
 
+WITHOUT_YAML = """
+import sys, tempfile
+sys.modules["yaml"] = None
+import importlib, pkgutil
+import nodesieve
+for module in pkgutil.walk_packages(nodesieve.__path__, "nodesieve."):
+    importlib.import_module(module.name)
+from nodesieve.core.batch import core_for
+assert core_for({}).name == "xray"
+from nodesieve.feed import LINKS_NAME, BASE64_NAME, CLASH_NAME, write_feed
+with tempfile.TemporaryDirectory() as directory:
+    node = "vless://11111111-1111-4111-8111-111111111111@192.0.2.1:443?security=tls&type=tcp#One"
+    result = write_feed([node], {"feed_dir": directory})
+    assert result["written"] and result["count"] == 1
+    from pathlib import Path
+    assert (Path(directory) / LINKS_NAME).exists()
+    assert (Path(directory) / BASE64_NAME).exists()
+    assert not (Path(directory) / CLASH_NAME).exists()
+"""
+
+
+def test_nodesieve_runs_with_xray_without_pyyaml():
+    finished = subprocess.run([sys.executable, "-c", WITHOUT_YAML], cwd=PROJECT, capture_output=True,
+                              text=True, timeout=60)
+    assert finished.returncode == 0, finished.stderr
+
+
 @pytest.mark.parametrize("name", ["requirements.txt", "requirements-termux.txt"])
 def test_requirements_ask_psutil_only_where_proc_meminfo_is_missing(name):
     lines = [line.strip() for line in (PROJECT / name).read_text().splitlines()

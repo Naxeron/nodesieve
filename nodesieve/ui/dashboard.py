@@ -10,10 +10,10 @@ import aiohttp
 from nodesieve.config import ConfigManager
 from nodesieve.constants import DEFAULT_CONFIG
 from nodesieve.core.fetcher import NodeFetcher
-from nodesieve.core.limits import ResourceLimits
+from nodesieve.core.limits import NODES_PER_INSTANCE, ResourceLimits
 from nodesieve.core.batch import NodeEndpoint, run_in_batches, setup_core
 from nodesieve.core.tester import NodeTester
-from nodesieve.feed import feed_status, run_feed_command, write_feed
+from nodesieve.feed import feed_server_keys, feed_status, run_feed_command, write_feed
 from nodesieve.logging import ErrorTracker, log, update_progress
 from nodesieve.routing import normalize_routing, select_main_pool
 
@@ -181,12 +181,12 @@ class VPNDashboard:
             elif isinstance(item, str):
                 clean_node_strs.append(item)
 
-        cfg_workers = self.config.get("workers", 8)
-        if not isinstance(cfg_workers, int):
-            cfg_workers = 8
-        speed_workers = min(8, max(4, cfg_workers), len(clean_node_strs))
+        # Measure one node at a time so downloads do not split the host's WAN bandwidth,
+        # while still sharing one core instance across up to NODES_PER_INSTANCE nodes.
+        speed_workers = 1
+        batch_size = min(NODES_PER_INSTANCE, len(clean_node_strs))
 
-        log.info(f"[*] Speedtesting {len(clean_node_strs)} surviving verified nodes with {speed_workers} workers...")
+        log.info(f"[*] Speedtesting {len(clean_node_strs)} surviving verified nodes sequentially...")
 
         setup_core(self.config)
         speedtest_timeout = self.config.get("speedtest_timeout", 30)
@@ -194,6 +194,7 @@ class VPNDashboard:
         completed = 0
         start_time = time.time()
         active_tester = tester or NodeTester(self.config, len(clean_node_strs))
+        active_tester.total_nodes = len(clean_node_strs)
 
         def record(idx: int, node: str, res: Any) -> None:
             nonlocal completed
@@ -207,8 +208,9 @@ class VPNDashboard:
 
         await run_in_batches(
             list(enumerate(clean_node_strs, 1)), active_tester.speedtest_links, speedtest, record,
-            config=self.config, workers=speed_workers, total_nodes=active_tester.total_nodes,
+            config=self.config, workers=speed_workers, total_nodes=len(clean_node_strs),
             temp_prefix="speed_core_", error_context="Speed Worker",
+            nodes_per_instance=batch_size,
         )
         print()
 
@@ -295,6 +297,7 @@ class VPNDashboard:
         False (a dry run). Its failure is reported but leaves the scan's result alone: the
         feed is in place, and apps fetch it on their own schedule as well.
         """
+        before_keys = feed_server_keys(self.config)
         try:
             result = write_feed(nodes, self.config)
         except (OSError, ValueError, TypeError) as exc:
@@ -305,7 +308,11 @@ class VPNDashboard:
         if result["written"]:
             log.info(f"[+] Subscription feed updated with {result['count']} nodes: {result['directory']}")
             if run_command:
-                run_feed_command(self.config)
+                after_keys = feed_server_keys(self.config)
+                if before_keys is not None and after_keys is not None and before_keys == after_keys:
+                    log.info("[*] Subscription feed servers and order are unchanged; skipping feed_command.")
+                else:
+                    run_feed_command(self.config)
         else:
             self.report_kept_feed()
         return True

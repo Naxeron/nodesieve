@@ -53,9 +53,13 @@ class ConfigManager:
         """Drop retired settings and replace malformed values with their defaults."""
         from nodesieve.routing import normalize_routing
 
-        # Older settings files may hold credentials for a remote router.
-        for key in ("router_host", "router_ssh_port", "router_ssh_user", "router_ssh_pass", "router_ssh_key_path",
-                    "router_api_port", "router_proxy_port", "enable_router_validation"):
+        # Older settings files may hold credentials for a remote router or retired WARP/AWG options.
+        for key in (
+            "router_host", "router_ssh_port", "router_ssh_user", "router_ssh_pass", "router_ssh_key_path",
+            "router_api_port", "router_proxy_port", "enable_router_validation",
+            "use_warp_scanner", "warp_private_key", "warp_ipv6",
+            "use_amnezia_wg", "amnezia_wg_conf", "use_warp_chaining",
+        ):
             config.pop(key, None)
         config["routing"] = normalize_routing(config.get("routing"))
 
@@ -108,6 +112,15 @@ class ConfigManager:
         for text_field in ("feed_dir", "feed_token", "feed_command"):
             value = config.get(text_field)
             config[text_field] = value.strip() if isinstance(value, str) else ""
+        formats = config.get("feed_formats")
+        if isinstance(formats, list):
+            cleaned_formats = list(dict.fromkeys(
+                str(fmt).strip().lower() for fmt in formats
+                if isinstance(fmt, str) and fmt.strip().lower() in ("links", "base64", "clash")
+            ))
+            config["feed_formats"] = cleaned_formats or list(DEFAULT_CONFIG["feed_formats"])
+        else:
+            config["feed_formats"] = list(DEFAULT_CONFIG["feed_formats"])
         host = config.get("feed_host")
         config["feed_host"] = host.strip() if isinstance(host, str) and host.strip() else DEFAULT_CONFIG["feed_host"]
         try:

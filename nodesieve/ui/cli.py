@@ -372,10 +372,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             sys.exit(1)
         config["min_speed_percent"] = args.min_speed_percent
 
-    # A scan starts a new crash log.
+    # Clear any stale crash log from an earlier scan; only created again if a node crashes.
     try:
-        with open(os.path.join(PROJECT_ROOT, CRASHED_LOG_FILE), "w", encoding="utf-8") as f:
-            f.write("--- CRASHED NODES LOG ---\n\n")
+        os.unlink(os.path.join(PROJECT_ROOT, CRASHED_LOG_FILE))
     except OSError:
         pass
     log.info("[*] Starting nodesieve pipeline...")

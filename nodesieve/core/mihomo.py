@@ -14,7 +14,10 @@ import sys
 import zipfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None  # Only needed when running Mihomo.
 
 from nodesieve.constants import MIHOMO_PATH
 from nodesieve.core.base import LISTEN_HOST, ProxyCore, download, go_crash
@@ -51,6 +54,8 @@ def render_batch_config(
     }
     if hosts:
         config["hosts"] = hosts
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to run Mihomo (install PyYAML or python3-yaml).")
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
 
 

@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 import ipaddress
 import json
 import re
+import ssl
 from typing import Iterable, Optional
 
 import aiohttp
@@ -115,6 +116,15 @@ IDENTITY_URLS = {
              "https://ipv6.wtfismyip.com/text"),
 }
 _COUNTRY_CODE = re.compile(r"[A-Z]{2}")
+_SSL_CONTEXT: Optional[ssl.SSLContext] = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Reuse one verified SSLContext across probes instead of reloading CA bundles per node."""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT
 
 
 def _consensus(counts):
@@ -312,8 +322,17 @@ async def _ip2location(client, token: asyncio.Future, family: str, ip: str) -> d
     return _report("ip2location.com", family, *_verdict(status, body, ("countryCode",)))
 
 
-async def _cloudflare(client, exits: dict) -> list[dict]:
-    """Cloudflare's vote in each family with an exit address, from one trace through the node.
+async def _cloudflare_fetch(client) -> tuple[Optional[int], Optional[str], Optional[str]]:
+    """Fetch Cloudflare's trace once; returns (status, body, error_reason)."""
+    try:
+        status, body = await client.request("GET", CLOUDFLARE_TRACE)
+        return status, body, None
+    except _REQUEST_ERRORS as exc:
+        return None, None, _failure(exc)
+
+
+def _cloudflare_reports(exits: dict, fetched: tuple[Optional[int], Optional[str], Optional[str]]) -> list[dict]:
+    """Turn one Cloudflare trace answer into per-family votes against the node's exit addresses.
 
     The node picks the family it reaches Cloudflare in. The country counts in every
     family except one whose exit Cloudflare did not see while it saw the other family's,
@@ -322,13 +341,12 @@ async def _cloudflare(client, exits: dict) -> list[dict]:
     """
     if not exits:
         return []
-    try:
-        status, body = await client.request("GET", CLOUDFLARE_TRACE)
-    except _REQUEST_ERRORS as exc:
-        return [_report("Cloudflare", family, reason=_failure(exc)) for family in exits]
-    seen = re.search(r"(?:^|\n)ip=([^\n]+)", body)
+    status, body, error = fetched
+    if error is not None:
+        return [_report("Cloudflare", family, reason=error) for family in exits]
+    seen = re.search(r"(?:^|\n)ip=([^\n]+)", body or "")
     seen_address = seen.group(1).strip() if seen else ""
-    country = re.search(r"(?:^|\n)loc=([^\n]*)", body)
+    country = re.search(r"(?:^|\n)loc=([^\n]*)", body or "")
     reports = []
     for family, address in exits.items():
         other = exits.get("ipv6" if family == "ipv4" else "ipv4")
@@ -337,6 +355,13 @@ async def _cloudflare(client, exits: dict) -> list[dict]:
         else:
             reports.append(_report("Cloudflare", family, *_verdict(status, country.group(1) if country else "", None)))
     return reports
+
+
+async def _cloudflare(client, exits: dict) -> list[dict]:
+    """Cloudflare's vote in each family with an exit address, from one trace through the node."""
+    if not exits:
+        return []
+    return _cloudflare_reports(exits, await _cloudflare_fetch(client))
 
 
 async def _exit_address(client, family: str) -> Optional[str]:
@@ -364,17 +389,28 @@ async def _exit_address(client, family: str) -> Optional[str]:
 async def query_providers(client) -> tuple[list[dict], dict]:
     """Every provider's report for each family the node has an exit address in, and those addresses.
 
-    A family's lookups start as soon as its address is known; MaxMind's and
-    ip2location.com's tokens are fetched once, meanwhile, for both.
+    A family's lookups start as soon as its address is known. Shared per-node requests
+    (MaxMind and ip2location.com tokens, and Cloudflare's trace) start lazily once the
+    first exit address answers, so dead nodes don't send them and IPv4-only nodes don't
+    wait for IPv6 discovery to finish before asking Cloudflare.
     """
     discoveries = {family: asyncio.ensure_future(_exit_address(client, family)) for family in FAMILIES}
-    maxmind_token = asyncio.ensure_future(_maxmind_token(client))
-    ip2location_token = asyncio.ensure_future(_ip2location_token(client))
+    shared_tasks: dict[str, asyncio.Future] = {}
+
+    def shared(name: str, factory) -> asyncio.Future:
+        task = shared_tasks.get(name)
+        if task is None:
+            task = asyncio.ensure_future(factory())
+            shared_tasks[name] = task
+        return task
 
     async def lookups(family):
         address = await discoveries[family]
         if not address:
             return []
+        maxmind_token = shared("maxmind", lambda: _maxmind_token(client))
+        ip2location_token = shared("ip2location", lambda: _ip2location_token(client))
+        shared("cloudflare", lambda: _cloudflare_fetch(client))
         return await asyncio.gather(
             _maxmind(client, maxmind_token, family, address),
             _ip2location(client, ip2location_token, family, address),
@@ -383,12 +419,16 @@ async def query_providers(client) -> tuple[list[dict], dict]:
 
     async def cloudflare():
         found = await asyncio.gather(*discoveries.values())
-        return await _cloudflare(client, {family: address for family, address in zip(discoveries, found) if address})
+        exits = {family: address for family, address in zip(discoveries, found) if address}
+        if not exits:
+            return []
+        fetched = await shared("cloudflare", lambda: _cloudflare_fetch(client))
+        return _cloudflare_reports(exits, fetched)
 
-    tasks = [*discoveries.values(), maxmind_token, ip2location_token]
     try:
         results = await asyncio.gather(lookups("ipv4"), lookups("ipv6"), cloudflare())
     finally:
+        tasks = [*discoveries.values(), *shared_tasks.values()]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -409,7 +449,7 @@ async def probe_location(proxy: str, families: Iterable[str] = (), real_ip: Opti
         if client is not None:
             reports, exits = await asyncio.wait_for(query_providers(client), timeout)
         else:
-            connector = aiohttp.TCPConnector(limit=REQUESTS_PER_NODE)
+            connector = aiohttp.TCPConnector(limit=REQUESTS_PER_NODE, ssl=_ssl_context())
             async with aiohttp.ClientSession(connector=connector, headers={"User-Agent": USER_AGENT}) as session:
                 reports, exits = await asyncio.wait_for(query_providers(ProxyClient(session, proxy)), timeout)
     except asyncio.TimeoutError:
