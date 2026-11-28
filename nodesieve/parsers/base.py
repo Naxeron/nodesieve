@@ -69,6 +69,12 @@ def get_node_name(node_uri: str) -> str:
     return unquote(node_uri.split("#", 1)[1]) if "#" in node_uri else "Unknown Node"
 
 
+def is_header_node(node_uri: str) -> bool:
+    """True for subscription section dividers / auto-select placeholders."""
+    name = get_node_name(node_uri)
+    return "Авто" in name or "⬇" in name
+
+
 def extract_node_protocol(node_uri: str) -> str:
     if "://" not in node_uri:
         return "VPN"

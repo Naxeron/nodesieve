@@ -182,6 +182,11 @@ class NodeEndpoint:
         except Exception:
             pass
 
+    def outbound_status(self) -> Tuple[str, Optional[str]]:
+        if self._process is None or not self.name:
+            return "none", None
+        return self.core.outbound_status(self._process.output(), self.name)
+
     async def ensure_alive(self) -> None:
         proc = self._process
         if proc is None or await proc.serves(self.port):
@@ -251,13 +256,13 @@ class _Process:
     def timed_out(self) -> bool:
         return self.proc is not None and self.proc.returncode is None
 
-    def output(self) -> List[str]:
+    def output(self, max_bytes: int = 262144) -> List[str]:
         if not self.log_path:
             return []
         try:
             with open(self.log_path, "rb") as f:
                 f.seek(0, os.SEEK_END)
-                f.seek(max(0, f.tell() - 65536))
+                f.seek(max(0, f.tell() - max_bytes))
                 data = f.read()
         except OSError:
             return []
@@ -455,6 +460,11 @@ class CoreRunner:
         self._serving = ep
         self.port, self.proxy_url = ep.port, ep.proxy_url
         return self
+
+    async def outbound_status(self) -> Tuple[str, Optional[str]]:
+        if self._serving is None:
+            return "none", None
+        return self._serving.outbound_status()
 
     async def ensure_alive(self) -> None:
         if self._serving is not None:

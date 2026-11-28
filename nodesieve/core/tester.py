@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 import urllib.parse
-from typing import Optional, Set, Tuple
+from typing import Optional, Sequence, Set, Tuple
 import aiohttp
 
 from nodesieve.constants import GEOBLOCKED_REGIONS
@@ -17,6 +17,7 @@ from nodesieve.parsers.base import (
     extract_node_protocol,
     format_descriptive_node_name,
     get_node_name,
+    is_header_node,
 )
 from nodesieve.routing import main_policy_failure, normalize_routing
 
@@ -40,6 +41,46 @@ def parse_cf_trace(text: str) -> Tuple[Optional[str], Optional[str]]:
     return (ip_m.group(1).strip() if ip_m else None), (loc_m.group(1).strip().upper() if loc_m else None)
 
 
+def _classify_fetch_error(exc: Exception) -> str:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, aiohttp.ClientHttpProxyError):
+        return f"proxy HTTP {exc.status}"
+    if isinstance(exc, aiohttp.ClientSSLError):
+        return "TLS error"
+    if isinstance(exc, aiohttp.ServerDisconnectedError):
+        return "connection closed"
+    if isinstance(exc, (aiohttp.ClientConnectorError, aiohttp.ClientOSError, OSError)):
+        os_err = getattr(exc, "os_error", None)
+        text = str(exc).lower()
+        if isinstance(os_err, ConnectionResetError) or "reset" in text:
+            return "connection reset"
+        if isinstance(os_err, ConnectionRefusedError) or "refused" in text:
+            return "connection refused"
+        return "connection error"
+    return type(exc).__name__
+
+
+def _diagnose_no_connectivity(
+    node: str, status: str, core_error: Optional[str], client_errors: Sequence[str],
+) -> Tuple[str, str]:
+    """Turn Xray outbound status + client fetch errors into a (label, reason) drop pair."""
+    if status == "error" and core_error:
+        return core_error, core_error
+    err = client_errors[0] if client_errors else None
+    if status == "dialing":
+        if err in (None, "timeout"):
+            msg = ("QUIC handshake timeout (no UDP response)"
+                   if extract_node_protocol(node) == "HYSTERIA2" else "Proxy handshake timeout")
+            return msg, msg
+        msg = f"Proxy connect failed ({err})"
+        return msg, msg
+    if err:
+        msg = f"No outbound internet ({err})"
+        return msg, msg
+    return "No outbound internet", "No outbound internet connectivity"
+
+
 class NodeTester:
     """Runs TCP reachability, exit IP/location checks, and speedtests on proxy nodes."""
 
@@ -56,8 +97,7 @@ class NodeTester:
 
     @staticmethod
     def _is_header_node(node: str) -> bool:
-        name = get_node_name(node)
-        return "Авто" in name or "⬇" in name
+        return is_header_node(node)
 
     @staticmethod
     def _as_checked(node: str) -> str:
@@ -95,6 +135,7 @@ class NodeTester:
 
     async def _fetch_ip(
         self, url: str, proxy: str, session: Optional[aiohttp.ClientSession] = None,
+        errors: Optional[list] = None,
     ) -> Tuple[Optional[str], Optional[str], float]:
         """Query Cloudflare trace via proxy for (exit_ip, country_code, latency_ms)."""
         is_v6 = "2606:4700:4700::1111" in url
@@ -117,8 +158,13 @@ class NodeTester:
                             latency = (time.perf_counter() - t0) * 1000
                             if ip_val and loc_val and ((":" in ip_val) == is_v6):
                                 return ip_val, loc_val, latency
-                except Exception:
-                    pass
+                            if errors is not None:
+                                errors.append("invalid trace response")
+                        elif errors is not None:
+                            errors.append(f"HTTP {resp.status}")
+                except Exception as exc:
+                    if errors is not None:
+                        errors.append(_classify_fetch_error(exc))
         finally:
             if close_session:
                 await session.close()
@@ -143,8 +189,9 @@ class NodeTester:
         node = checked
         node_name = get_node_name(node)
 
-        async def drop(label: str, reason: str, **details) -> None:
-            await runner.ensure_alive()
+        async def drop(label: str, reason: str, check_alive: bool = True, **details) -> None:
+            if check_alive:
+                await runner.ensure_alive()
             safe_print(f"[-] Node {idx}/{self.total_nodes} [{node_name}] -> Dropped ({label})")
             self.node_metadata[node] = self.node_metadata[original_node] = {
                 "dropped": True, "reason": reason, **details,
@@ -156,17 +203,27 @@ class NodeTester:
                 node_idx=idx, total_nodes=self.total_nodes, endpoint=endpoint,
             ) as runner:
                 connector = aiohttp.TCPConnector(ssl=bool(routing_enabled), limit=10)
+                v4_errors: list[str] = []
+                v6_errors: list[str] = []
                 async with aiohttp.ClientSession(
                     connector=connector, timeout=aiohttp.ClientTimeout(total=6.0, connect=4.0),
                     max_line_size=65536, max_field_size=65536,
                 ) as session:
                     (ipv4_ip, ipv4_loc, v4_lat), (ipv6_ip, ipv6_loc, v6_lat) = await asyncio.gather(
-                        self._fetch_ip(TRACE_URL_IPV4, runner.proxy_url, session=session),
-                        self._fetch_ip(TRACE_URL_IPV6, runner.proxy_url, session=session),
+                        self._fetch_ip(TRACE_URL_IPV4, runner.proxy_url, session=session, errors=v4_errors),
+                        self._fetch_ip(TRACE_URL_IPV6, runner.proxy_url, session=session, errors=v6_errors),
                     )
 
                 if not routing_enabled and not ipv4_ip and not ipv6_ip:
-                    await drop("No outbound internet", "No outbound internet connectivity")
+                    await runner.ensure_alive()
+                    raw_status = await runner.outbound_status()
+                    status, core_err = (
+                        raw_status
+                        if isinstance(raw_status, tuple) and len(raw_status) == 2 and isinstance(raw_status[0], str)
+                        else ("none", None)
+                    )
+                    label, reason = _diagnose_no_connectivity(node, status, core_err, v4_errors or v6_errors)
+                    await drop(label, reason, check_alive=False)
                     return None
                 if self.real_ip and self.real_ip in (ipv4_ip, ipv6_ip):
                     await drop("IP leak", "Proxy leaks real IP")

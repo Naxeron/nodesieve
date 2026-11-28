@@ -190,3 +190,38 @@ def test_full_check_qualifies_dual_stack_and_drops_dead_leaks_and_blocked():
     ):
         r, t = _full_check(node, traces)
         assert r is None and t.node_metadata[node]["reason"] == reason
+
+
+def test_full_check_reports_specific_drop_diagnostics(capsys):
+    hy2 = "hysteria2://pw@hy.example:443/#NL%20Hysteria2"
+    vless = "vless://uuid@198.51.100.7:443#Primary"
+
+    async def run_case(node, outbound_status, client_err=None):
+        tester = _tester()
+        runner = AsyncMock(proxy_url="http://127.0.0.1:12345", port=12345)
+        runner.outbound_status = AsyncMock(return_value=outbound_status)
+
+        async def fake_fetch(url, proxy, session=None, errors=None):
+            if errors is not None and client_err is not None:
+                errors.append(client_err)
+            return None, None, 99999.0
+
+        with patch("nodesieve.core.tester.CoreRunner", return_value=_Ctx(runner)), \
+                patch.object(tester, "_fetch_ip", side_effect=fake_fetch):
+            res = await tester.test_node_full(1, node)
+        return res, tester.node_metadata[node]["reason"], capsys.readouterr().out
+
+    for node, status, err, expected in (
+        (hy2, ("error", "QUIC handshake timeout (no UDP response)"), "connection reset",
+         "QUIC handshake timeout (no UDP response)"),
+        (hy2, ("error", "Hysteria 2 auth failed code 404"), "connection reset",
+         "Hysteria 2 auth failed code 404"),
+        (hy2, ("dialing", None), "timeout",
+         "QUIC handshake timeout (no UDP response)"),
+        (vless, ("dialing", None), "timeout",
+         "Proxy handshake timeout"),
+        (hy2, ("tunneled", None), "connection reset",
+         "No outbound internet (connection reset)"),
+    ):
+        res, reason, out = asyncio.run(run_case(node, status, err))
+        assert res is None and reason == expected and f"Dropped ({expected})" in out

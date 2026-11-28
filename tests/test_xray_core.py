@@ -139,6 +139,28 @@ def test_render_config_and_log_parsing():
     assert list(core.busy(["Failed to start: failed to listen TCP on 20002 > bind"], [("node-0", 20001), ("node-1", 20002)])) == [1]
     assert core.detail(["panic: runtime error", "goroutine 1"]) == "panic: runtime error"
 
+    # Per-outbound [Info] log diagnostics isolate tags and summarize concrete failure causes.
+    info_lines = [
+        "2026/11/28 22:52:06 [Info] [100] app/dispatcher: taking detour [node-0] for [tcp:1.1.1.1:443]",
+        "2026/11/28 22:52:11 [Info] [100] app/proxyman/outbound: app/proxyman/outbound: failed to process outbound traffic > proxy/hysteria: failed to find an available destination > timeout: no recent network activity",
+        "2026/11/28 22:52:06 [Info] [101] app/dispatcher: taking detour [node-1] for [tcp:1.1.1.1:443]",
+        "2026/11/28 22:52:06 [Info] [101] app/proxyman/outbound: failed to process outbound traffic > proxy/hysteria: failed to find an available destination > INTERNAL_ERROR (local): tls: failed to verify certificate: x509: certificate signed by unknown authority",
+        "2026/11/28 22:52:06 [Info] [102] app/dispatcher: taking detour [node-2] for [tcp:1.1.1.1:443]",
+        "2026/11/28 22:52:06 [Info] [102] app/proxyman/outbound: failed to process outbound traffic > proxy/hysteria: failed to find an available destination > transport/internet/hysteria: auth failed code 404",
+        "2026/11/28 22:52:06 [Info] [103] app/dispatcher: taking detour [node-3] for [tcp:1.1.1.1:443]",
+        "2026/11/28 22:52:08 [Info] [103] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [transport/internet/tcp: failed to dial to dest > dial tcp 1.2.3.4:443: connect: connection refused transport/internet/tcp: failed to dial to dest > dial tcp 1.2.3.4:443: connect: connection refused] > common/retry: all retry attempts failed",
+        "2026/11/28 22:52:06 [Info] [104] app/dispatcher: taking detour [node-4] for [tcp:1.1.1.1:443]",
+        "2026/11/28 22:52:06 [Info] [104] proxy/hysteria: tunneling request to tcp:1.1.1.1:443 via TCP:127.0.0.1:443",
+        "2026/11/28 22:52:06 [Info] [105] app/dispatcher: taking detour [node-5] for [tcp:1.1.1.1:443]",
+    ]
+    assert core.outbound_status(info_lines, "node-0") == ("error", "QUIC handshake timeout (no UDP response)")
+    assert core.outbound_status(info_lines, "node-1") == ("error", "TLS certificate error: certificate signed by unknown authority")
+    assert core.outbound_status(info_lines, "node-2") == ("error", "Hysteria 2 auth failed code 404")
+    assert core.outbound_status(info_lines, "node-3") == ("error", "Proxy connection refused")
+    assert core.outbound_status(info_lines, "node-4") == ("tunneled", None)
+    assert core.outbound_status(info_lines, "node-5") == ("dialing", None)
+    assert core.outbound_status(info_lines, "node-99") == ("none", None)
+
 
 @pytest.mark.parametrize("machine, android, system, asset", [
     ("x86_64", False, "linux", "Xray-linux-64.zip"),
@@ -587,17 +609,24 @@ def test_real_xray_relays_through_udp_hysteria2_server(real_xray, tmp_path, obfs
         async with target, _xray_server(real_xray, tmp_path, inbound, socket.SOCK_DGRAM) as port:
             link = f"hy2://{PASSWORD}@127.0.0.1:1/?mport={port}&sni=hy2.test&pinSHA256={pin}&obfs={obfs}&obfs-password=test-obfs#Local"
             url = f"http://127.0.0.1:{target.sockets[0].getsockname()[1]}/"
-            async with CoreBatch([BatchNode(link), BatchNode(link.replace(pin, "00" * 32))], {}) as batch:
-                good, bad_pin = batch.endpoints
-                assert not good.error and not bad_pin.error
+            async with CoreBatch([BatchNode(link), BatchNode(link.replace(pin, "00" * 32)),
+                                  BatchNode(link.replace(PASSWORD, "wrong-password"))], {}) as batch:
+                good, bad_pin, bad_auth = batch.endpoints
+                assert not good.error and not bad_pin.error and not bad_auth.error
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
                     async with s.get(url, proxy=good.proxy_url) as resp:
                         assert await resp.text() == "hello"
-                    try:
-                        async with s.get(url, proxy=bad_pin.proxy_url) as resp:
-                            assert resp.status != 200
-                    except (aiohttp.ClientError, asyncio.TimeoutError):
-                        pass
+                    for broken in (bad_pin, bad_auth):
+                        try:
+                            async with s.get(url, proxy=broken.proxy_url) as resp:
+                                assert resp.status != 200
+                        except (aiohttp.ClientError, asyncio.TimeoutError):
+                            pass
+                assert good.outbound_status() == ("tunneled", None)
+                pin_state, pin_err = bad_pin.outbound_status()
+                assert pin_state == "error" and pin_err and "TLS" in pin_err
+                auth_state, auth_err = bad_auth.outbound_status()
+                assert auth_state == "error" and auth_err and "auth failed" in auth_err
             assert hits == [1]
 
     asyncio.run(run())

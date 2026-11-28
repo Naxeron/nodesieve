@@ -13,7 +13,7 @@ import aiohttp
 from nodesieve.constants import PROJECT_ROOT, SUB_CACHE_DIR
 from nodesieve.files import write_atomic
 from nodesieve.logging import ErrorTracker, log
-from nodesieve.parsers.base import node_key
+from nodesieve.parsers.base import is_header_node, node_key
 from nodesieve.parsers.hysteria2 import HYSTERIA2_SCHEMES, parse_hysteria2
 
 
@@ -49,8 +49,10 @@ class NodeFetcher:
                 for url, nodes in zip(subs, results):
                     if isinstance(nodes, list):
                         for n in nodes:
+                            if is_header_node(n):
+                                continue
                             node_to_url.setdefault(n, url)
-                        all_nodes.extend(nodes)
+                            all_nodes.append(n)
         else:
             log.info("[-] No remote subscriptions configured.")
 
@@ -145,6 +147,8 @@ class NodeFetcher:
             if not sep or scheme not in self.supported_protos:
                 continue
             n = scheme + sep + rest
+            if is_header_node(n):
+                continue
             if scheme in HYSTERIA2_SCHEMES:
                 if parse_hysteria2(n):
                     valid.append(n)

@@ -74,3 +74,21 @@ def test_fetch_keeps_first_alias_and_source(monkeypatch):
     monkeypatch.setattr(fetcher, "_process_url", AsyncMock(side_effect=[[first], [second]]))
     nodes, sources = asyncio.run(fetcher.fetch_all())
     assert nodes == [first] and sources[first] == "https://one.test"
+
+
+def test_header_dividers_do_not_shadow_real_nodes_with_same_uri(monkeypatch):
+    hy2_header = "hysteria2://pw@hy.example:443/#%F0%9F%87%AA%F0%9F%87%BA%20%E2%AC%87%EF%B8%8F%20Gaming%20%E2%AC%87%EF%B8%8F"
+    hy2_real = "hysteria2://pw@hy.example:443/#NL%20Hysteria2"
+    vless_header = "vless://u@v.example:443?security=tls#%D0%90%D0%B2%D1%82%D0%BE"
+    vless_real = "vless://u@v.example:443?security=tls#RealVLESS"
+
+    fetcher = NodeFetcher({"subscriptions": ["https://sub.test"]})
+    parsed = fetcher._parse_subscription("\n".join([hy2_header, hy2_real, vless_header, vless_real]))
+    assert parsed == [hy2_real, vless_real]
+    assert fetcher._parse_subscription("\n".join([hy2_header, vless_header])) == []
+
+    # Even if _process_url returns headers before real nodes, fetch_all skips headers before deduplicating.
+    monkeypatch.setattr(fetcher, "_process_url", AsyncMock(return_value=[hy2_header, hy2_real, vless_header, vless_real]))
+    nodes, sources = asyncio.run(fetcher.fetch_all())
+    assert nodes == [hy2_real, vless_real]
+    assert set(sources) == {hy2_real, vless_real}
