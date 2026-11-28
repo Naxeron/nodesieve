@@ -1,25 +1,24 @@
-"""Writing the files that hold proxy credentials."""
+"""Atomic file writes with explicit permissions."""
 
 import os
 import tempfile
 from pathlib import Path
+from typing import Union
 
 
-def write_private(path: Path, text: str, mode: int = 0o600) -> None:
-    """Replace path with text in one step, with permissions mode (owner only by default).
-
-    The text goes to a temporary file next to path first, so a reader sees the old
-    file or the new one, never part of either.
-    """
-    fd, temporary = tempfile.mkstemp(prefix=".psc-", dir=path.parent)
+def write_atomic(path: Union[Path, str], data: Union[str, bytes], mode: int = 0o600) -> None:
+    """Replace path atomically with text or bytes and Unix permissions mode."""
+    target = Path(path)
+    binary = isinstance(data, bytes)
+    fd, tmp = tempfile.mkstemp(prefix=".ns-", dir=target.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
-            output.write(text)
-            output.flush()
-            # Windows has no fchmod before Python 3.13; its files carry no Unix modes anyway.
+        kwargs = {} if binary else {"encoding": "utf-8", "newline": "\n"}
+        with os.fdopen(fd, "wb" if binary else "w", **kwargs) as out:
+            out.write(data)
+            out.flush()
             if hasattr(os, "fchmod"):
-                os.fchmod(output.fileno(), mode)
-        os.replace(temporary, path)
+                os.fchmod(out.fileno(), mode)
+        os.replace(tmp, target)
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        if os.path.exists(tmp):
+            os.unlink(tmp)

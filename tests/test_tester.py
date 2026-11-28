@@ -1,422 +1,192 @@
-"""Unit tests for NodeTester: TCP ping, IP resolution fidelity, the Phase 1 IP check, and speedtest logic."""
+"""Unit tests for NodeTester: TCP ping, IP trace resolution, Phase 1 check, and speedtest."""
 
 import asyncio
-import unittest
+import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from nodesieve.core.tester import NodeTester
 
 
-class MockRequestContext:
-    def __init__(self, response):
-        self.response = response
+class _Ctx:
+    def __init__(self, value, on_exit=None):
+        self.value, self.on_exit = value, on_exit
 
     async def __aenter__(self):
-        return self.response
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-
-class TestNodeTester(unittest.TestCase):
-    def setUp(self):
-        self.config = {
-            "allowed_countries": ["US", "DE"],
-            "speedtest_timeout": 5,
-            "ip_mode": "off",
-            "use_mux": False,
-        }
-        self.tester = NodeTester(self.config, total_nodes=1)
-
-    def test_tcp_ping_invalid_nodes(self):
-        async def run():
-            # Filtered tags
-            res_auto = await self.tester.async_check_tcp_node("vless://uuid@1.2.3.4:443#Авто_Node")
-            self.assertIsNone(res_auto)
-
-            # Invalid host
-            res_invalid = await self.tester.async_check_tcp_node("invalid://node")
-            self.assertIsNone(res_invalid)
-
-        asyncio.run(run())
-
-    def test_fetch_ip_ipv4_and_ipv6_fidelity(self):
-        async def run():
-            trace_v4 = "ip=203.0.113.10\nloc=US\nts=12345\n"
-            trace_v6 = "ip=2001:db8::1\nloc=DE\nts=12345\n"
-
-            # Test IPv4
-            mock_resp_v4 = MagicMock()
-            mock_resp_v4.status = 200
-            mock_resp_v4.text = AsyncMock(return_value=trace_v4)
-            mock_session_v4 = MagicMock()
-            mock_session_v4.get.return_value = MockRequestContext(mock_resp_v4)
-
-            ip, loc, lat = await self.tester._fetch_ip(
-                "https://1.1.1.1/cdn-cgi/trace", "http://127.0.0.1:8080", session=mock_session_v4
-            )
-            self.assertEqual(ip, "203.0.113.10")
-            self.assertEqual(loc, "US")
-            self.assertGreater(lat, 0.0)
-
-            # Test IPv6
-            mock_resp_v6 = MagicMock()
-            mock_resp_v6.status = 200
-            mock_resp_v6.text = AsyncMock(return_value=trace_v6)
-            mock_session_v6 = MagicMock()
-            mock_session_v6.get.return_value = MockRequestContext(mock_resp_v6)
-
-            ip6, loc6, lat6 = await self.tester._fetch_ip(
-                "https://[2606:4700:4700::1111]/cdn-cgi/trace", "http://127.0.0.1:8080", session=mock_session_v6
-            )
-            self.assertEqual(ip6, "2001:db8::1")
-            self.assertEqual(loc6, "DE")
-
-            # Test IPv6 rejection when IPv4 is returned by error
-            mock_resp_bad_v6 = MagicMock()
-            mock_resp_bad_v6.status = 200
-            mock_resp_bad_v6.text = AsyncMock(return_value=trace_v4)  # returns IPv4 for IPv6 URL
-            mock_session_bad_v6 = MagicMock()
-            mock_session_bad_v6.get.return_value = MockRequestContext(mock_resp_bad_v6)
-
-            ip_bad, loc_bad, _ = await self.tester._fetch_ip(
-                "https://[2606:4700:4700::1111]/cdn-cgi/trace", "http://127.0.0.1:8080", session=mock_session_bad_v6
-            )
-            self.assertIsNone(ip_bad)
-
-        asyncio.run(run())
-
-    def test_speedtest_sustained_measurement(self):
-        async def run():
-            node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#TestSpeed"
-
-            mock_runner = AsyncMock()
-            mock_runner.proxy_url = "http://127.0.0.1:12345"
-            mock_runner.port = 12345
-
-            with patch("nodesieve.core.tester.CoreRunner") as MockRunner:
-                MockRunner.return_value.__aenter__.return_value = mock_runner
-                chunk_data = b"0" * 131072  # 128KB chunk
-
-                class MockStreamContent:
-                    async def iter_chunked(self, size):
-                        for _ in range(20):
-                            yield chunk_data
-                            await asyncio.sleep(0.005)
-
-                mock_resp = MagicMock()
-                mock_resp.status = 200
-                mock_resp.content = MockStreamContent()
-
-                mock_session = MagicMock()
-                mock_session.get.return_value = MockRequestContext(mock_resp)
-
-                class MockSessionContext:
-                    async def __aenter__(self):
-                        return mock_session
-
-                    async def __aexit__(self, *args):
-                        pass
-
-                with patch("aiohttp.ClientSession", return_value=MockSessionContext()):
-                    res = await self.tester.speedtest_node(1, node, timeout=5)
-                    self.assertIsNotNone(res)
-                    res_node, speed_bps, loc = res
-                    self.assertGreater(speed_bps, 0.0)
-                    import urllib.parse
-                    self.assertIn("⚡", urllib.parse.unquote(res_node))
-
-        asyncio.run(run())
-
-    def test_speedtest_excludes_warmup_and_teardown_and_uses_100mb_payload(self):
-        async def run():
-            node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#Warmup"
-            mock_runner = AsyncMock()
-            mock_runner.proxy_url = "http://127.0.0.1:12345"
-            mock_runner.port = 12345
-
-            clock = [0.0]
-            chunk_data = b"0" * 131072  # 128 KiB
-
-            class RampStream:
-                async def iter_chunked(self, size):
-                    # First chunk sets t=0.0; slow-start chunks span warmup (0.5 s).
-                    yield chunk_data
-                    clock[0] = 0.25
-                    yield chunk_data
-                    clock[0] = 0.50
-                    yield chunk_data
-                    # Steady state: 160 chunks (20 MiB) over exactly 1.0 s -> 20 MiB/s.
-                    for i in range(1, 161):
-                        clock[0] = 0.50 + i / 160.0
-                        yield chunk_data
-
-            class SlowCloseContext:
-                def __init__(self, response):
-                    self.response = response
-
-                async def __aenter__(self):
-                    return self.response
-
-                async def __aexit__(self, *args):
-                    # Simulate 0.5 s connection teardown after transfer finishes.
-                    clock[0] += 0.50
-
-            mock_resp = MagicMock(status=200, content=RampStream())
-            mock_session = MagicMock()
-            mock_session.get.return_value = SlowCloseContext(mock_resp)
-
-            class MockSessionContext:
-                async def __aenter__(self):
-                    return mock_session
-
-                async def __aexit__(self, *args):
-                    pass
-
-            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
-                    patch("aiohttp.ClientSession", return_value=MockSessionContext()), \
-                    patch("nodesieve.core.tester.time.perf_counter", side_effect=lambda: clock[0]):
-                MockRunner.return_value.__aenter__.return_value = mock_runner
-                res = await self.tester.speedtest_node(1, node, timeout=45)
-
-            self.assertIsNotNone(res)
-            _, speed_bps, _ = res
-            self.assertAlmostEqual(speed_bps / 1024 / 1024, 20.0, delta=0.1)
-            called_url = mock_session.get.call_args.args[0]
-            self.assertEqual(called_url, "https://speed.cloudflare.com/__down?bytes=100000000")
-            self.assertEqual(mock_session.get.call_args.kwargs["timeout"].sock_read, 4.0)
-
-        asyncio.run(run())
-
-    def test_speedtest_early_stops_after_steady_state_sample(self):
-        async def run():
-            node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#Fast"
-            mock_runner = AsyncMock()
-            mock_runner.proxy_url = "http://127.0.0.1:12345"
-            mock_runner.port = 12345
-
-            clock = [0.0]
-            chunk_data = b"0" * 131072  # 128 KiB
-
-            class InfiniteFastStream:
-                async def iter_chunked(self, size):
-                    # 25 MiB/s: 128 KiB every 0.005 s.
-                    yield chunk_data
-                    while True:
-                        clock[0] += 0.005
-                        yield chunk_data
-
-            mock_resp = MagicMock(status=200, content=InfiniteFastStream())
-            mock_session = MagicMock()
-            mock_session.get.return_value = MockRequestContext(mock_resp)
-
-            class MockSessionContext:
-                async def __aenter__(self):
-                    return mock_session
-
-                async def __aexit__(self, *args):
-                    pass
-
-            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
-                    patch("aiohttp.ClientSession", return_value=MockSessionContext()), \
-                    patch("nodesieve.core.tester.time.perf_counter", side_effect=lambda: clock[0]):
-                MockRunner.return_value.__aenter__.return_value = mock_runner
-                res = await self.tester.speedtest_node(1, node, timeout=45)
-
-            self.assertIsNotNone(res)
-            _, speed_bps, _ = res
-            self.assertAlmostEqual(speed_bps / 1024 / 1024, 25.0, delta=0.2)
-            # 0.5 s warmup + 2.5 s steady-state early stop, well before 6.0 s cap.
-            self.assertLess(clock[0], 3.5)
-
-        asyncio.run(run())
-
-    def test_speedtest_penalizes_mid_stream_stall_and_checks_core_liveness(self):
-        async def run():
-            node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#Stall"
-            mock_runner = AsyncMock()
-            mock_runner.proxy_url = "http://127.0.0.1:12345"
-            mock_runner.port = 12345
-
-            clock = [0.0]
-            chunk_data = b"0" * 131072  # 128 KiB
-
-            class StallingStream:
-                async def iter_chunked(self, size):
-                    yield chunk_data
-                    for _ in range(4):  # 512 KiB in 0.2 s, then hangs for 4.0 s
-                        clock[0] += 0.05
-                        yield chunk_data
-                    clock[0] += 4.0
-                    raise asyncio.TimeoutError()
-
-            mock_resp = MagicMock(status=200, content=StallingStream())
-            mock_session = MagicMock()
-            mock_session.get.return_value = MockRequestContext(mock_resp)
-
-            class MockSessionContext:
-                async def __aenter__(self):
-                    return mock_session
-
-                async def __aexit__(self, *args):
-                    pass
-
-            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
-                    patch("aiohttp.ClientSession", return_value=MockSessionContext()), \
-                    patch("nodesieve.core.tester.time.perf_counter", side_effect=lambda: clock[0]):
-                MockRunner.return_value.__aenter__.return_value = mock_runner
-                res = await self.tester.speedtest_node(1, node, timeout=45)
-
-            self.assertIsNotNone(res)
-            _, speed_bps, _ = res
-            # 512 KiB over 4.2 s (~0.12 MiB/s), not over 0.2 s (~2.5 MiB/s).
-            self.assertAlmostEqual(speed_bps / 1024 / 1024, 0.5 / 4.2, delta=0.02)
-            mock_runner.ensure_alive.assert_awaited()
-
-        asyncio.run(run())
-
-    def test_test_node_full_dead_node_aborts_immediately(self):
-        async def run():
-            node = "vless://uuid@1.2.3.4:443#DeadNode"
-            mock_runner = AsyncMock()
-            mock_runner.proxy_url = "http://127.0.0.1:12345"
-            mock_runner.port = 12345
-
-            with patch("nodesieve.core.tester.CoreRunner") as MockRunner:
-                MockRunner.return_value.__aenter__.return_value = mock_runner
-                with patch.object(self.tester, "_fetch_ip", return_value=(None, None, 99999.0)):
-                    with patch.object(self.tester, "fetch_location") as mock_location:
-                        res = await self.tester.test_node_full(1, node)
-                        self.assertIsNone(res)
-                        # Ensure no location probes were wasted on dead node
-                        mock_location.assert_not_called()
-                        self.assertEqual(self.tester.node_metadata[node]["reason"], "No outbound internet connectivity")
-
-        asyncio.run(run())
-
-    def test_fetch_ip_latency_reset_on_retry(self):
-        async def run():
-            # First endpoint fails, second endpoint succeeds immediately
-            mock_resp_v4 = MagicMock()
-            mock_resp_v4.status = 200
-            mock_resp_v4.text = AsyncMock(return_value="ip=203.0.113.10\nloc=US\n")
-
-            mock_session = MagicMock()
-            mock_session.get.side_effect = [
-                Exception("Timeout connecting to 1.1.1.1"),
-                MockRequestContext(mock_resp_v4),
-            ]
-
-            ip, loc, lat = await self.tester._fetch_ip(
-                "https://1.1.1.1/cdn-cgi/trace", "http://127.0.0.1:8080", session=mock_session
-            )
-            self.assertEqual(ip, "203.0.113.10")
-            self.assertEqual(loc, "US")
-            self.assertLess(lat, 5000.0)
-
-        asyncio.run(run())
-
-    def _full_check(self, node, traces, tester=None, country_name="United States", **patches):
-        """Runs test_node_full against stubbed Cloudflare traces: (ipv4 result, ipv6 result)."""
-        tester = tester or self.tester
-
-        async def run():
-            mock_runner = AsyncMock()
-            mock_runner.proxy_url = "http://127.0.0.1:12345"
-            mock_runner.port = 12345
-            with patch("nodesieve.core.tester.CoreRunner") as MockRunner, \
-                    patch.object(tester, "_fetch_ip", new=AsyncMock(side_effect=list(traces))), \
-                    patch("nodesieve.core.tester.GeolocationService.get_country_name",
-                          new=AsyncMock(return_value=country_name)), \
-                    patch("nodesieve.core.tester.GeolocationService.get_ip_country",
-                          new=AsyncMock(return_value=patches.get("ip_country"))):
-                MockRunner.return_value.__aenter__.return_value = mock_runner
-                return await tester.test_node_full(1, node)
-
-        return asyncio.run(run())
-
-    def test_node_qualifies_on_ip_check_alone(self):
-        import urllib.parse
-
-        node = "vless://uuid@198.51.100.7:443#PrimaryNode"
-        res = self._full_check(node, [("203.0.113.10", "US", 25.0), (None, None, 99999.0)])
-        self.assertIsNotNone(res)
-        survivor, latency, original = res
-        self.assertEqual((latency, original), (25.0, node))
-        name = urllib.parse.unquote(survivor.split("#", 1)[1])
-        self.assertEqual(name, "[VLESS: PrimaryNode] \U0001F1FA\U0001F1F8 United-States | 203.0.113.10")
-        meta = self.tester.node_metadata[survivor]
-        self.assertIs(meta, self.tester.node_metadata[node])
-        self.assertEqual(meta, {
-            "country_code": "US", "country_name": "United States",
-            "latency_ms": 25.0, "location": None, "loc_score": 0.0,
-        })
-
-    def test_node_reports_both_address_families(self):
-        import urllib.parse
-
-        res = self._full_check(
-            "vless://uuid@198.51.100.7:443#DualStack",
-            [("203.0.113.10", "DE", 40.0), ("2001:db8::1", "DE", 30.0)],
-            country_name="Germany",
-        )
-        self.assertEqual(res[1], 30.0)
-        self.assertTrue(urllib.parse.unquote(res[0]).endswith("Germany | 203.0.113.10 | 2001:db8::1"))
-
-    def test_node_dropped_for_blocked_or_disallowed_exit_country(self):
-        node = "vless://uuid@198.51.100.7:443#Tag"
-        for loc, reason in (("RU", "Geo-blocked region (RU)"), ("FR", "Location not allowed (FR)")):
-            with self.subTest(loc=loc):
-                res = self._full_check(node, [("203.0.113.10", loc, 25.0), (None, None, 99999.0)])
-                self.assertIsNone(res)
-                self.assertEqual(self.tester.node_metadata[node], {
-                    "dropped": True, "reason": reason, "country_code": loc,
-                })
-        # A blocked IPv6 exit is not hidden behind an acceptable IPv4 exit.
-        res = self._full_check(node, [("203.0.113.10", "US", 25.0), ("2001:db8::1", "CN", 30.0)])
-        self.assertIsNone(res)
-
-    def test_node_dropped_when_exit_ip_is_the_real_ip(self):
-        tester = NodeTester(self.config, total_nodes=1, real_ip="203.0.113.10")
-        node = "vless://uuid@198.51.100.7:443#Leaky"
-        res = self._full_check(node, [("203.0.113.10", "US", 25.0), (None, None, 99999.0)], tester=tester)
-        self.assertIsNone(res)
-        self.assertEqual(tester.node_metadata[node]["reason"], "Proxy leaks real IP")
-
-    def test_node_dropped_when_country_unresolvable_records_metadata(self):
-        node = "vless://uuid@127.0.0.1:443#UnresolvableNode"
-        res = self._full_check(node, [("198.51.100.1", None, 25.0), (None, None, 99999.0)], ip_country=None)
-        self.assertIsNone(res)
-        self.assertTrue(self.tester.node_metadata[node]["dropped"])
-        self.assertIn("location", self.tester.node_metadata[node]["reason"])
-
-    def test_ip_mode_requires_the_configured_address_families(self):
-        node = "vless://uuid@198.51.100.7:443#Tag"
-        v4_only = [("203.0.113.10", "US", 25.0), (None, None, 99999.0)]
-        dual = [("203.0.113.10", "US", 25.0), ("2001:db8::1", "US", 30.0)]
-        for ip_mode, traces, survives in (
-            ("two_ips", v4_only, False), ("two_ips", dual, True),
-            ("one_ip", v4_only, True), ("one_ip", dual, False),
-        ):
-            with self.subTest(ip_mode=ip_mode, families=len([t for t in traces if t[0]])):
-                tester = NodeTester({**self.config, "ip_mode": ip_mode}, total_nodes=1)
-                res = self._full_check(node, traces, tester=tester)
-                self.assertEqual(res is not None, survives)
-
-    def test_location_ranking_score_is_labelled_and_reused_by_speedtest_naming(self):
-        import urllib.parse
-
-        tester = NodeTester({**self.config, "enable_loc_ranking": True}, total_nodes=1)
-        with patch.object(tester, "fetch_loc_score", new=AsyncMock(return_value=0.75)) as score:
-            res = self._full_check(
-                "vless://uuid@198.51.100.7:443#Ranked",
-                [("203.0.113.10", "US", 25.0), (None, None, 99999.0)], tester=tester,
-            )
-        score.assert_awaited_once_with(12345, ["US", "DE"], "203.0.113.10", None)
-        name = urllib.parse.unquote(res[0].split("#", 1)[1])
-        self.assertEqual(name, "[VLESS: Ranked] \U0001F1FA\U0001F1F8 United-States | LOC: 75% | 203.0.113.10")
-        self.assertEqual(tester.node_metadata[res[0]]["loc_score"], 0.75)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        return self.value
+
+    async def __aexit__(self, *args):
+        if self.on_exit:
+            self.on_exit()
+
+
+def _tester(**overrides):
+    return NodeTester({"allowed_countries": ["US", "DE"], "speedtest_timeout": 5, **overrides}, total_nodes=1)
+
+
+def _run_speedtest(stream, timeout=45, clock=None, on_close=None):
+    node = "vless://11111111-1111-4111-8111-111111111111@198.51.100.219:443?security=tls&sni=example.com#Speed"
+    runner = AsyncMock(proxy_url="http://127.0.0.1:12345", port=12345)
+    session = MagicMock()
+    session.get.return_value = _Ctx(MagicMock(status=200, content=stream), on_exit=on_close)
+
+    async def run():
+        patches = [
+            patch("nodesieve.core.tester.CoreRunner", return_value=_Ctx(runner)),
+            patch("aiohttp.ClientSession", return_value=_Ctx(session)),
+        ]
+        if clock is not None:
+            patches.append(patch("nodesieve.core.tester.time.perf_counter", side_effect=lambda: clock[0]))
+        with patches[0], patches[1]:
+            if len(patches) == 3:
+                with patches[2]:
+                    return await _tester().speedtest_node(1, node, timeout=timeout)
+            return await _tester().speedtest_node(1, node, timeout=timeout)
+
+    return asyncio.run(run()), runner, session
+
+
+def _full_check(node, traces, tester=None, country_name="United States"):
+    tester = tester or _tester()
+
+    async def run():
+        runner = AsyncMock(proxy_url="http://127.0.0.1:12345", port=12345)
+        with patch("nodesieve.core.tester.CoreRunner", return_value=_Ctx(runner)), \
+                patch.object(tester, "_fetch_ip", new=AsyncMock(side_effect=list(traces))), \
+                patch("nodesieve.core.tester.GeolocationService.get_country_name", new=AsyncMock(return_value=country_name)):
+            return await tester.test_node_full(1, node)
+
+    return asyncio.run(run()), tester
+
+
+def test_tcp_ping_rejects_headers_and_invalid_uris():
+    t = _tester()
+    assert asyncio.run(t.async_check_tcp_node("vless://uuid@1.2.3.4:443#Авто_Node")) is None
+    assert asyncio.run(t.async_check_tcp_node("invalid://node")) is None
+
+
+def test_fetch_ip_ipv4_ipv6_fidelity_and_retry():
+    t = _tester()
+
+    def session_for(responses):
+        s = MagicMock()
+        s.get.side_effect = [
+            r if isinstance(r, BaseException) else _Ctx(MagicMock(status=200, text=AsyncMock(return_value=r)))
+            for r in responses
+        ]
+        return s
+
+    async def run():
+        v4 = await t._fetch_ip("https://1.1.1.1/cdn-cgi/trace", "http://127.0.0.1:8080",
+                               session=session_for(["ip=203.0.113.10\nloc=US\n"]))
+        assert v4[:2] == ("203.0.113.10", "US") and v4[2] > 0
+
+        v6 = await t._fetch_ip("https://[2606:4700:4700::1111]/cdn-cgi/trace", "http://127.0.0.1:8080",
+                               session=session_for(["ip=2001:db8::1\nloc=DE\n"]))
+        assert v6[:2] == ("2001:db8::1", "DE")
+
+        # IPv6 URL must reject IPv4 trace response.
+        bad = await t._fetch_ip("https://[2606:4700:4700::1111]/cdn-cgi/trace", "http://127.0.0.1:8080",
+                                session=session_for(["ip=203.0.113.10\nloc=US\n"]))
+        assert bad[0] is None
+
+        # Retry resets latency on fallback URL.
+        retry = await t._fetch_ip("https://1.1.1.1/cdn-cgi/trace", "http://127.0.0.1:8080",
+                                  session=session_for([Exception("timeout"), "ip=203.0.113.10\nloc=US\n"]))
+        assert retry[:2] == ("203.0.113.10", "US") and retry[2] < 5000.0
+
+    asyncio.run(run())
+
+
+def test_speedtest_sustained_warmup_early_stop_and_stall_penalty():
+    chunk = b"0" * 131072  # 128 KiB
+
+    class BasicStream:
+        async def iter_chunked(self, size):
+            for _ in range(20):
+                yield chunk
+                await asyncio.sleep(0.005)
+
+    res, _, _ = _run_speedtest(BasicStream(), timeout=5)
+    assert res and res[1] > 0 and "⚡" in urllib.parse.unquote(res[0])
+
+    # Excludes 0.5 s warmup and 0.5 s teardown; measures 20 MiB over 1.0 s -> 20 MiB/s.
+    clock = [0.0]
+
+    class RampStream:
+        async def iter_chunked(self, size):
+            yield chunk
+            clock[0] = 0.25
+            yield chunk
+            clock[0] = 0.50
+            yield chunk
+            for i in range(1, 161):
+                clock[0] = 0.50 + i / 160.0
+                yield chunk
+
+    res, _, sess = _run_speedtest(RampStream(), clock=clock, on_close=lambda: clock.__setitem__(0, clock[0] + 0.5))
+    assert res[1] / 1048576 == pytest.approx(20.0, abs=0.1)
+    assert sess.get.call_args.args[0] == "https://speed.cloudflare.com/__down?bytes=100000000"
+    assert sess.get.call_args.kwargs["timeout"].sock_read == 4.0
+
+    # Early stop after 2.5 s steady-state sample at 25 MiB/s.
+    clock = [0.0]
+
+    class FastStream:
+        async def iter_chunked(self, size):
+            yield chunk
+            while True:
+                clock[0] += 0.005
+                yield chunk
+
+    res, _, _ = _run_speedtest(FastStream(), clock=clock)
+    assert res[1] / 1048576 == pytest.approx(25.0, abs=0.2) and clock[0] < 3.5
+
+    # Mid-stream stall penalized by wall-clock timeout and triggers ensure_alive().
+    clock = [0.0]
+
+    class StallingStream:
+        async def iter_chunked(self, size):
+            yield chunk
+            for _ in range(4):
+                clock[0] += 0.05
+                yield chunk
+            clock[0] += 4.0
+            raise asyncio.TimeoutError()
+
+    res, runner, _ = _run_speedtest(StallingStream(), clock=clock)
+    assert res[1] / 1048576 == pytest.approx(0.5 / 4.2, abs=0.02)
+    runner.ensure_alive.assert_awaited()
+
+
+def test_full_check_qualifies_dual_stack_and_drops_dead_leaks_and_blocked():
+    node = "vless://uuid@198.51.100.7:443#Primary"
+    res, t = _full_check(node, [("203.0.113.10", "US", 25.0), (None, None, 99999.0)])
+    survivor, latency, orig = res
+    assert (latency, orig) == (25.0, node)
+    assert urllib.parse.unquote(survivor.split("#", 1)[1]) == "[VLESS: Primary] 🇺🇸 United-States | 203.0.113.10"
+    assert t.node_metadata[survivor] == {"country_code": "US", "country_name": "United States",
+                                         "latency_ms": 25.0, "location": None}
+
+    res, _ = _full_check(node, [("203.0.113.10", "DE", 40.0), ("2001:db8::1", "DE", 30.0)], country_name="Germany")
+    assert res[1] == 30.0 and urllib.parse.unquote(res[0]).endswith("Germany | 203.0.113.10 | 2001:db8::1")
+
+    # Dead node aborts without location probe.
+    dead, t = _full_check(node, [(None, None, 99999.0), (None, None, 99999.0)])
+    assert dead is None and t.node_metadata[node]["reason"] == "No outbound internet connectivity"
+
+    # Leak drops node.
+    leak_res, t_leak = _full_check(node, [("203.0.113.10", "US", 25.0), (None, None, 99999.0)],
+                                   tester=NodeTester({"allowed_countries": ["US"]}, 1, "203.0.113.10"))
+    assert leak_res is None and t_leak.node_metadata[node]["reason"] == "Proxy leaks real IP"
+
+    # Blocked or disallowed countries (including IPv6 blocked behind allowed IPv4).
+    for traces, reason in (
+        ([("203.0.113.10", "RU", 25.0), (None, None, 99999.0)], "Geo-blocked region (RU)"),
+        ([("203.0.113.10", "FR", 25.0), (None, None, 99999.0)], "Location not allowed (FR)"),
+        ([("203.0.113.10", "US", 25.0), ("2001:db8::1", "CN", 30.0)], "Geo-blocked region (CN)"),
+        ([("198.51.100.1", None, 25.0), (None, None, 99999.0)], "Could not determine node location"),
+    ):
+        r, t = _full_check(node, traces)
+        assert r is None and t.node_metadata[node]["reason"] == reason

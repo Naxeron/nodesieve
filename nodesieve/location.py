@@ -1,25 +1,6 @@
-"""Country consensus from GeoIP providers, asked through a node's proxy.
+"""Country consensus from 14 GeoIP providers asked through a node's proxy.
 
-Each provider names the country it places the node's exit address in, for IPv4 and IPv6
-separately. Every provider counts once per family, and the consensus is the country
-most of them name; routing.py decides what qualifies.
-
-The providers, and how each is asked, are those of the "geoip" group of ipregion
-(https://github.com/vernette/ipregion, MIT License, see THIRD_PARTY_NOTICES.md), which
-nodesieve ran as a bash script before:
-
-- Every request goes through the node, which resolves the provider's name, so each
-  provider sees the node's exit address and applies its rate limits to it.
-- The exit address of each family is what identity services, on hosts with one family
-  each, see a request come from. Most providers then look up that address, given in the
-  URL. Cloudflare reports the address a request comes from and its country; its country
-  counts in a family unless the node reached it through the other family's address.
-- Some nodes leave through different addresses for different destinations: their
-  provider sends some traffic out directly from the server, the rest abroad. The
-  address identity services see then decides, as it did with ipregion, even where the
-  Cloudflare trace of the IP check saw another one.
-- A request may take REQUEST_TIMEOUT seconds. A 403, 429 or 5xx answer, a request that
-  fails, or an answer without a two-letter country is not a vote.
+Providers adapted from the "geoip" group of ipregion (MIT, see THIRD_PARTY_NOTICES.md).
 """
 
 from __future__ import annotations
@@ -35,8 +16,6 @@ from typing import Iterable, Optional
 
 import aiohttp
 
-
-# ISO 3166-1 alpha-2. A two-letter error/placeholder is not country evidence.
 COUNTRIES = frozenset("""
 AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL
 BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV
@@ -50,31 +29,19 @@ ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY
 UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW
 """.split())
 FAMILIES = ("ipv4", "ipv6")
-# The evidence's "source", which routing.py requires.
 SOURCE = "geoip"
-# Seconds each request may take through the node, its TLS handshakes included; ipregion's
-# default. With two, good nodes failed on mobile data, where the first requests through a
-# freshly started node often take longer.
 REQUEST_TIMEOUT = 5
-# A probe's requests take at most three of those in a row (MaxMind's); this only bounds a
-# node that stalls connections in a way no single request's timeout catches.
 PROBE_TIMEOUT = 60
-# Requests in flight through one node, as ipregion ran its parallel jobs.
 REQUESTS_PER_NODE = 16
-# The client ipregion's requests named; some providers answer other clients differently.
 USER_AGENT = "curl/8.11.1"
 
 
 @dataclass(frozen=True)
 class Lookup:
-    """A provider asked for the country of the address in its URL ({ip})."""
     name: str
     url: str
-    # Keys and list indexes that lead to the country in the JSON answer; None when the
-    # answer is the country code itself.
     path: Optional[tuple] = None
     headers: dict = field(default_factory=dict)
-    # A separate URL for IPv6 addresses, on a host that has only an IPv6 address.
     ipv6_url: Optional[str] = None
 
 
@@ -97,18 +64,8 @@ LOOKUPS = (
     Lookup("ip-api.com", "https://demo.ip-api.com/json/{ip}?fields=countryCode", ("countryCode",),
            {"Origin": "https://ip-api.com"}),
 )
-# The rest take more than one request: see _maxmind, _ip2location and _cloudflare.
-PROVIDERS = ("MaxMind", "Cloudflare", "ip2location.com", *(lookup.name for lookup in LOOKUPS))
-
-MAXMIND_PAGE = "https://www.maxmind.com/en/geoip-web-services-demo"
-MAXMIND_TOKEN = "https://www.maxmind.com/en/geoip2/demo/token"
-MAXMIND_CITY = "https://geoip.maxmind.com/geoip/v2.1/city/{ip}?demo=1"
-_MAXMIND_CSRF = re.compile(r'value="([0-9a-f]+)" name="csrf_token"')
-IP2LOCATION_PAGE = "https://www.ip2location.com"
-IP2LOCATION_QUERY = "https://api.ip2location.io/query/"
-_IP2LOCATION_TOKEN = re.compile(r"(?:^|\n)\s*t: ([0-9]+),\s*token: '([0-9a-f]+)'")
+PROVIDERS = ("Cloudflare", *(lookup.name for lookup in LOOKUPS))
 CLOUDFLARE_TRACE = "https://www.cloudflare.com/cdn-cgi/trace"
-# Services that report the address a request comes from, on hosts with one family each.
 IDENTITY_URLS = {
     "ipv4": ("https://ipv4.icanhazip.com", "https://api.ipify.org", "https://ipv4.seeip.org",
              "https://ipv4.wtfismyip.com/text"),
@@ -116,85 +73,73 @@ IDENTITY_URLS = {
              "https://ipv6.wtfismyip.com/text"),
 }
 _COUNTRY_CODE = re.compile(r"[A-Z]{2}")
+_REQUEST_ERRORS = (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, LookupError)
 _SSL_CONTEXT: Optional[ssl.SSLContext] = None
 
 
 def _ssl_context() -> ssl.SSLContext:
-    """Reuse one verified SSLContext across probes instead of reloading CA bundles per node."""
     global _SSL_CONTEXT
     if _SSL_CONTEXT is None:
         _SSL_CONTEXT = ssl.create_default_context()
     return _SSL_CONTEXT
 
 
-def _consensus(counts):
+def _consensus(counts: dict) -> dict:
     counts = dict(sorted(counts.items()))
     total = sum(counts.values())
     votes = max(counts.values(), default=0)
-    winners = [country for country, count in counts.items() if count == votes]
+    winners = [c for c, n in counts.items() if n == votes]
     return {"country": winners[0] if len(winners) == 1 else None,
-            "score": votes / total if total else 0.0,
-            "votes": votes, "total": total, "counts": counts}
+            "score": votes / total if total else 0.0, "votes": votes, "total": total, "counts": counts}
 
 
-def empty_location(status="unknown", reason=None, families=()):
-    evidence = {"source": SOURCE, **_consensus({}),
-                "families": {family: _consensus({}) for family in families},
-                "tested_families": list(families), "status": status, "ip_leak": False}
+def empty_location(status: str = "unknown", reason: Optional[str] = None, families: Iterable[str] = ()) -> dict:
+    ev = {"source": SOURCE, **_consensus({}),
+          "families": {f: _consensus({}) for f in families},
+          "tested_families": list(families), "status": status, "ip_leak": False}
     if reason:
-        evidence["reason"] = reason
-    return evidence
+        ev["reason"] = reason
+    return ev
 
 
 def _address(value: object, family: str) -> Optional[str]:
-    """value as an address of this family, written the standard way, or None."""
     if not isinstance(value, str):
         return None
     try:
-        address = ipaddress.ip_address(value.strip())
+        addr = ipaddress.ip_address(value.strip())
     except ValueError:
         return None
-    return str(address) if address.version == (4 if family == "ipv4" else 6) else None
+    return str(addr) if addr.version == (4 if family == "ipv4" else 6) else None
 
 
 def location_evidence(reports: Iterable[dict], exits: Optional[dict] = None, families: Iterable[str] = (),
                       real_ip: Optional[str] = None) -> dict:
-    """The consensus of the providers' reports ({"provider", "family", "country", "reason"}).
-
-    Each provider counts once per family, and not at all in a family it named two
-    countries for. ``families`` need a consensus even when no provider answered for them,
-    as does every family with an exit address or a vote. Exit addresses are only
-    compared with this computer's own address, to find a leak, and are left out of the
-    result.
-    """
+    """Compute per-family and aggregate country consensus from provider reports."""
     exits = exits or {}
-    discovered = {family for family in families if family in FAMILIES}
-    discovered |= {family for family, address in exits.items() if family in FAMILIES and address}
-    observations = {family: defaultdict(set) for family in FAMILIES}
-    for report in reports:
-        family, provider, country = report.get("family"), report.get("provider"), report.get("country")
-        if family in FAMILIES and isinstance(provider, str) and provider.strip() and country in COUNTRIES:
-            discovered.add(family)
-            observations[family][provider.strip().casefold()].add(country)
-    evidence = empty_location(families=FAMILIES)
-    aggregate = Counter()
-    for family, providers in observations.items():
-        counts = Counter(next(iter(values)) for values in providers.values() if len(values) == 1)
-        evidence["families"][family] = _consensus(counts)
+    discovered = {f for f in families if f in FAMILIES} | {f for f, a in exits.items() if f in FAMILIES and a}
+    observations = {f: defaultdict(set) for f in FAMILIES}
+    for r in reports:
+        f, p, c = r.get("family"), r.get("provider"), r.get("country")
+        if f in FAMILIES and isinstance(p, str) and p.strip() and c in COUNTRIES:
+            discovered.add(f)
+            observations[f][p.strip().casefold()].add(c)
+    ev = empty_location(families=FAMILIES)
+    aggregate: Counter = Counter()
+    for f, providers in observations.items():
+        counts = Counter(next(iter(vals)) for vals in providers.values() if len(vals) == 1)
+        ev["families"][f] = _consensus(counts)
         aggregate.update(counts)
-    evidence["tested_families"] = [family for family in FAMILIES if family in discovered]
-    evidence.update(_consensus(aggregate))
-    evidence["status"] = "ok" if evidence["country"] else "unknown"
+    ev["tested_families"] = [f for f in FAMILIES if f in discovered]
+    ev.update(_consensus(aggregate))
+    ev["status"] = "ok" if ev["country"] else "unknown"
     own = _address(real_ip, "ipv4") or _address(real_ip, "ipv6")
-    if own is not None and own in {_address(address, family) for family, address in exits.items()}:
-        evidence["ip_leak"] = True
-        evidence["status"] = "failed"
-        evidence["reason"] = "Proxy leaks real IP"
-    return evidence
+    if own is not None and own in {_address(a, f) for f, a in exits.items()}:
+        ev.update(ip_leak=True, status="failed", reason="Proxy leaks real IP")
+    return ev
 
 
 class ProxyClient:
-    """The requests of one probe, all through the node's proxy, REQUESTS_PER_NODE at a time."""
+    """Bounded concurrent HTTP requester routed through one local proxy."""
 
     def __init__(self, session: aiohttp.ClientSession, proxy: str):
         self.session = session
@@ -205,8 +150,8 @@ class ProxyClient:
                       data: Optional[dict] = None) -> tuple[int, str]:
         async with self.slots:
             async with self.session.request(method, url, proxy=self.proxy, headers=headers, data=data,
-                                            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as response:
-                return response.status, await response.text(errors="replace")
+                                            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+                return resp.status, await resp.text(errors="replace")
 
 
 def _report(provider: str, family: str, country: Optional[str] = None, reason: Optional[str] = None) -> dict:
@@ -214,7 +159,6 @@ def _report(provider: str, family: str, country: Optional[str] = None, reason: O
 
 
 def _failure(exc: BaseException) -> str:
-    """Why a request failed, for an exception the request may raise."""
     if isinstance(exc, asyncio.TimeoutError):
         return "timeout"
     if isinstance(exc, aiohttp.ClientSSLError):
@@ -222,29 +166,15 @@ def _failure(exc: BaseException) -> str:
     return "connection failed"
 
 
-# What a request can fail with (LookupError: an answer in an unknown character set);
-# anything else is a bug to surface, not a missing vote.
-_REQUEST_ERRORS = (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, LookupError)
-
-
-def _http_failure(status: int) -> Optional[str]:
-    if status == 403:
-        return "forbidden (403)"
-    if status == 429:
-        return "rate limited (429)"
-    if 500 <= status <= 599:
-        return f"server error ({status})"
-    return None
-
-
 def _verdict(status: int, body: str, path: Optional[tuple]) -> tuple[Optional[str], Optional[str]]:
-    """(country, None) from an answer that names one, or (None, why not)."""
-    failure = _http_failure(status)
-    if failure:
-        return None, failure
-    if path is None:
-        value: object = body
-    else:
+    if status == 403:
+        return None, "forbidden (403)"
+    if status == 429:
+        return None, "rate limited (429)"
+    if 500 <= status <= 599:
+        return None, f"server error ({status})"
+    value: object = body
+    if path is not None:
         try:
             value = json.loads(body)
             for key in path:
@@ -256,195 +186,98 @@ def _verdict(status: int, body: str, path: Optional[tuple]) -> tuple[Optional[st
     return None, f"unexpected response ({status})"
 
 
-async def _ask(client, lookup: Lookup, family: str, ip: str) -> dict:
-    url = (lookup.ipv6_url if family == "ipv6" and lookup.ipv6_url else lookup.url).format(ip=ip)
+async def _safe_get(client, url: str, headers: Optional[dict] = None) -> tuple[Optional[int], Optional[str], Optional[str]]:
     try:
-        status, body = await client.request("GET", url, headers=lookup.headers or None)
-    except _REQUEST_ERRORS as exc:
-        return _report(lookup.name, family, reason=_failure(exc))
-    return _report(lookup.name, family, *_verdict(status, body, lookup.path))
-
-
-async def _maxmind_token(client) -> tuple[Optional[str], Optional[str]]:
-    """MaxMind's demo token, fetched as its demo page does: (token, None) or (None, why not)."""
-    try:
-        status, page = await client.request("GET", MAXMIND_PAGE)
-        match = _MAXMIND_CSRF.search(page)
-        if not match:
-            return None, _http_failure(status) or f"unexpected response ({status})"
-        status, body = await client.request("POST", MAXMIND_TOKEN, headers={"X-CSRF-Token": match.group(1)})
-    except _REQUEST_ERRORS as exc:
-        return None, _failure(exc)
-    if status != 201:
-        return None, _http_failure(status) or f"unexpected response ({status})"
-    try:
-        token = json.loads(body).get("token")
-    except (ValueError, AttributeError):
-        token = None
-    return (token, None) if isinstance(token, str) and token else (None, "unexpected response (201)")
-
-
-async def _maxmind(client, token: asyncio.Future, family: str, ip: str) -> dict:
-    value, reason = await token
-    if not value:
-        return _report("MaxMind", family, reason=reason)
-    try:
-        status, body = await client.request("GET", MAXMIND_CITY.format(ip=ip),
-                                            headers={"Authorization": f"Bearer {value}"})
-    except _REQUEST_ERRORS as exc:
-        return _report("MaxMind", family, reason=_failure(exc))
-    if status == 402:
-        return _report("MaxMind", family, reason="daily limit (402)")
-    return _report("MaxMind", family, *_verdict(status, body, ("country", "iso_code")))
-
-
-async def _ip2location_token(client) -> tuple[Optional[tuple[str, str]], Optional[str]]:
-    """The timestamp and token ip2location.com's page queries with, or (None, why not)."""
-    try:
-        status, page = await client.request("GET", IP2LOCATION_PAGE)
-    except _REQUEST_ERRORS as exc:
-        return None, _failure(exc)
-    match = _IP2LOCATION_TOKEN.search(page)
-    if not match:
-        return None, _http_failure(status) or f"unexpected response ({status})"
-    return (match.group(1), match.group(2)), None
-
-
-async def _ip2location(client, token: asyncio.Future, family: str, ip: str) -> dict:
-    found, reason = await token
-    if not found:
-        return _report("ip2location.com", family, reason=reason)
-    timestamp, value = found
-    try:
-        status, body = await client.request("POST", IP2LOCATION_QUERY, data={"ip": ip, "t": timestamp, "token": value})
-    except _REQUEST_ERRORS as exc:
-        return _report("ip2location.com", family, reason=_failure(exc))
-    return _report("ip2location.com", family, *_verdict(status, body, ("countryCode",)))
-
-
-async def _cloudflare_fetch(client) -> tuple[Optional[int], Optional[str], Optional[str]]:
-    """Fetch Cloudflare's trace once; returns (status, body, error_reason)."""
-    try:
-        status, body = await client.request("GET", CLOUDFLARE_TRACE)
+        status, body = await client.request("GET", url, headers=headers)
         return status, body, None
     except _REQUEST_ERRORS as exc:
         return None, None, _failure(exc)
 
 
-def _cloudflare_reports(exits: dict, fetched: tuple[Optional[int], Optional[str], Optional[str]]) -> list[dict]:
-    """Turn one Cloudflare trace answer into per-family votes against the node's exit addresses.
+async def _ask(client, lookup: Lookup, family: str, ip: str) -> dict:
+    url = (lookup.ipv6_url if family == "ipv6" and lookup.ipv6_url else lookup.url).format(ip=ip)
+    status, body, err = await _safe_get(client, url, headers=lookup.headers or None)
+    if err is not None:
+        return _report(lookup.name, family, reason=err)
+    return _report(lookup.name, family, *_verdict(status, body, lookup.path))
 
-    The node picks the family it reaches Cloudflare in. The country counts in every
-    family except one whose exit Cloudflare did not see while it saw the other family's,
-    as ipregion counts it: a node leaving through another address for Cloudflare still
-    gets Cloudflare's vote.
-    """
+
+def _cloudflare_reports(exits: dict, fetched: tuple[Optional[int], Optional[str], Optional[str]]) -> list[dict]:
     if not exits:
         return []
-    status, body, error = fetched
-    if error is not None:
-        return [_report("Cloudflare", family, reason=error) for family in exits]
+    status, body, err = fetched
+    if err is not None:
+        return [_report("Cloudflare", f, reason=err) for f in exits]
     seen = re.search(r"(?:^|\n)ip=([^\n]+)", body or "")
-    seen_address = seen.group(1).strip() if seen else ""
-    country = re.search(r"(?:^|\n)loc=([^\n]*)", body or "")
+    seen_ip = seen.group(1).strip() if seen else ""
+    loc = re.search(r"(?:^|\n)loc=([^\n]*)", body or "")
+    loc_val = loc.group(1) if loc else ""
     reports = []
-    for family, address in exits.items():
-        other = exits.get("ipv6" if family == "ipv4" else "ipv4")
-        if other and _address(seen_address, "ipv6" if family == "ipv4" else "ipv4") == other:
+    for family in exits:
+        other_fam = "ipv6" if family == "ipv4" else "ipv4"
+        other_ip = exits.get(other_fam)
+        if other_ip and _address(seen_ip, other_fam) == other_ip:
             reports.append(_report("Cloudflare", family, reason="the node used its other family"))
         else:
-            reports.append(_report("Cloudflare", family, *_verdict(status, country.group(1) if country else "", None)))
+            reports.append(_report("Cloudflare", family, *_verdict(status, loc_val, None)))
     return reports
 
 
-async def _cloudflare(client, exits: dict) -> list[dict]:
-    """Cloudflare's vote in each family with an exit address, from one trace through the node."""
-    if not exits:
-        return []
-    return _cloudflare_reports(exits, await _cloudflare_fetch(client))
-
-
 async def _exit_address(client, family: str) -> Optional[str]:
-    """The node's exit address in this family, from the first identity service to name one."""
-    async def ask(url):
-        try:
-            status, body = await client.request("GET", url)
-        except _REQUEST_ERRORS:
-            return None
-        return _address(body, family) if status == 200 else None
+    async def ask(url: str) -> Optional[str]:
+        status, body, err = await _safe_get(client, url)
+        return _address(body, family) if err is None and status == 200 else None
 
     tasks = [asyncio.ensure_future(ask(url)) for url in IDENTITY_URLS[family]]
     try:
         for answer in asyncio.as_completed(tasks):
-            address = await answer
-            if address:
-                return address
+            if addr := await answer:
+                return addr
         return None
     finally:
-        for task in tasks:
-            task.cancel()
+        for t in tasks:
+            t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def query_providers(client) -> tuple[list[dict], dict]:
-    """Every provider's report for each family the node has an exit address in, and those addresses.
+    """Discover per-family exit addresses and query all 14 GeoIP providers concurrently."""
+    discoveries = {f: asyncio.ensure_future(_exit_address(client, f)) for f in FAMILIES}
+    cf_task: Optional[asyncio.Future] = None
 
-    A family's lookups start as soon as its address is known. Shared per-node requests
-    (MaxMind and ip2location.com tokens, and Cloudflare's trace) start lazily once the
-    first exit address answers, so dead nodes don't send them and IPv4-only nodes don't
-    wait for IPv6 discovery to finish before asking Cloudflare.
-    """
-    discoveries = {family: asyncio.ensure_future(_exit_address(client, family)) for family in FAMILIES}
-    shared_tasks: dict[str, asyncio.Future] = {}
+    def start_cloudflare() -> asyncio.Future:
+        nonlocal cf_task
+        if cf_task is None:
+            cf_task = asyncio.ensure_future(_safe_get(client, CLOUDFLARE_TRACE))
+        return cf_task
 
-    def shared(name: str, factory) -> asyncio.Future:
-        task = shared_tasks.get(name)
-        if task is None:
-            task = asyncio.ensure_future(factory())
-            shared_tasks[name] = task
-        return task
-
-    async def lookups(family):
-        address = await discoveries[family]
-        if not address:
+    async def lookups(family: str) -> list[dict]:
+        addr = await discoveries[family]
+        if not addr:
             return []
-        maxmind_token = shared("maxmind", lambda: _maxmind_token(client))
-        ip2location_token = shared("ip2location", lambda: _ip2location_token(client))
-        shared("cloudflare", lambda: _cloudflare_fetch(client))
-        return await asyncio.gather(
-            _maxmind(client, maxmind_token, family, address),
-            _ip2location(client, ip2location_token, family, address),
-            *(_ask(client, lookup, family, address) for lookup in LOOKUPS),
-        )
+        start_cloudflare()
+        return list(await asyncio.gather(*(_ask(client, lk, family, addr) for lk in LOOKUPS)))
 
-    async def cloudflare():
+    async def cloudflare() -> list[dict]:
         found = await asyncio.gather(*discoveries.values())
-        exits = {family: address for family, address in zip(discoveries, found) if address}
-        if not exits:
-            return []
-        fetched = await shared("cloudflare", lambda: _cloudflare_fetch(client))
-        return _cloudflare_reports(exits, fetched)
+        exits = {f: a for f, a in zip(discoveries, found) if a}
+        return _cloudflare_reports(exits, await start_cloudflare()) if exits else []
 
     try:
         results = await asyncio.gather(lookups("ipv4"), lookups("ipv6"), cloudflare())
     finally:
-        tasks = [*discoveries.values(), *shared_tasks.values()]
-        for task in tasks:
-            task.cancel()
+        tasks = [*discoveries.values(), *([cf_task] if cf_task else [])]
+        for t in tasks:
+            t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-    exits = {family: task.result() for family, task in discoveries.items() if task.result()}
-    return [report for result in results for report in result], exits
+    exits = {f: t.result() for f, t in discoveries.items() if t.result()}
+    return [r for group in results for r in group], exits
 
 
 async def probe_location(proxy: str, families: Iterable[str] = (), real_ip: Optional[str] = None,
                          timeout: float = PROBE_TIMEOUT, client=None) -> dict:
-    """GeoIP evidence for the node behind ``proxy`` (http://127.0.0.1:<port>); the caller limits concurrency.
-
-    ``families`` are the ones the IP check found the node reachable in: they need a
-    consensus even when no identity service answers in them here. ``client`` stands in
-    for the requests in tests.
-    """
-    families = [family for family in FAMILIES if family in tuple(families)]
+    """Collect GeoIP consensus through proxy (http://127.0.0.1:<port>)."""
+    fam_list = [f for f in FAMILIES if f in tuple(families)]
     try:
         if client is not None:
             reports, exits = await asyncio.wait_for(query_providers(client), timeout)
@@ -453,7 +286,7 @@ async def probe_location(proxy: str, families: Iterable[str] = (), real_ip: Opti
             async with aiohttp.ClientSession(connector=connector, headers={"User-Agent": USER_AGENT}) as session:
                 reports, exits = await asyncio.wait_for(query_providers(ProxyClient(session, proxy)), timeout)
     except asyncio.TimeoutError:
-        return empty_location("failed", "GeoIP providers did not answer in time", families)
+        return empty_location("failed", "GeoIP providers did not answer in time", fam_list)
     if not exits:
-        return empty_location("failed", "No exit address answered through the proxy", families)
-    return location_evidence(reports, exits, families, real_ip)
+        return empty_location("failed", "No exit address answered through the proxy", fam_list)
+    return location_evidence(reports, exits, fam_list, real_ip)

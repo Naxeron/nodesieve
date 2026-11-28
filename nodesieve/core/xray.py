@@ -1,8 +1,4 @@
-"""Xray as the core nodes are checked through: its binary, its configuration and its log.
-
-Share links are written for Xray, so through Xray a node is checked the way the apps the
-links are made for connect to it, FinalMask fragmenting and all.
-"""
+"""Xray proxy core: binary download, batch configuration rendering, and log parsing."""
 
 import copy
 import hashlib
@@ -12,58 +8,58 @@ import os
 import platform
 import re
 import sys
-import tempfile
+import urllib.request
 import zipfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from nodesieve.constants import IS_ANDROID, IS_TERMUX, XRAY_PATH
-from nodesieve.core.base import LISTEN_HOST, ProxyCore, download, go_crash, release_assets
+from nodesieve.files import write_atomic
 from nodesieve.logging import log
 from nodesieve.parsers.xray import node_url_to_xray_outbound
 
+LISTEN_HOST = "127.0.0.1"
 XRAY_RELEASE_API = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-# What takes the connections no rule names; the listeners each have one.
-_REFUSE_TAG = "refuse"
-# Xray's log: "2026/11/20 23:31:51.386004 [Warning] message", and how a failed start reads.
+_GO_CRASH = ("panic:", "fatal error:")
 _LOG_LINE = re.compile(r"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d(?:\.\d+)? \[(\w+)\] (.*)$")
 _REFUSED = re.compile(r"failed to build outbound config with tag (\S+?) > (.+)$")
 _LISTEN_FAILED = re.compile(r"failed to listen TCP on (\d+)")
 
 
+def download(url: str, timeout: float = 120.0) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "nodesieve"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def release_assets(api_url: str) -> Dict[str, str]:
+    release = json.loads(download(api_url, timeout=30.0).decode("utf-8"))
+    return {a.get("name", ""): a.get("browser_download_url", "") for a in release.get("assets", [])}
+
+
 def xray_asset(machine: Optional[str] = None, android: Optional[bool] = None,
                system: Optional[str] = None) -> Optional[str]:
-    """The name of Xray's release archive for this platform, or None for one it has none for."""
+    """Xray release archive name for this platform, or None if unsupported."""
     machine = (machine or platform.machine()).lower()
     android = (IS_ANDROID or IS_TERMUX) if android is None else android
     system = system or ("windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux")
-    arch = {"x86_64": "64", "amd64": "64", "aarch64": "arm64-v8a", "arm64": "arm64-v8a", "armv8l": "arm32-v7a",
-            "armv7l": "arm32-v7a", "armv7": "arm32-v7a", "armv6l": "arm32-v6", "i386": "32", "i686": "32",
-            "x86": "32", "riscv64": "riscv64"}.get(machine)
+    arch = {
+        "x86_64": "64", "amd64": "64", "aarch64": "arm64-v8a", "arm64": "arm64-v8a",
+        "armv8l": "arm32-v7a", "armv7l": "arm32-v7a", "armv7": "arm32-v7a", "armv6l": "arm32-v6",
+        "i386": "32", "i686": "32", "x86": "32", "riscv64": "riscv64",
+    }.get(machine)
     if arch is None:
         return None
     if system == "linux" and android and arch in ("arm64-v8a", "64"):
-        # The Android builds look host names up as Android does; there are only these two.
         return f"Xray-android-{'amd64' if arch == '64' else arch}.zip"
     if system in ("windows", "macos") and arch not in ("64", "arm64-v8a", "32"):
         return None
     return f"Xray-{system}-{arch}.zip"
 
 
-def _sha256(digest_file: str) -> Optional[str]:
-    """The SHA-256 a release's .dgst file gives."""
-    match = re.search(r"^SHA2-256=\s*([0-9a-f]{64})\s*$", digest_file, re.MULTILINE | re.IGNORECASE)
-    return match.group(1).lower() if match else None
-
-
 def render_xray_config(served: Sequence[Tuple[dict, int]], hosts: Optional[Dict[str, List[str]]] = None) -> str:
-    """Xray configuration serving each outbound on a mixed listener of its own at 127.0.0.1:port.
-
-    Each listener has a routing rule to its outbound. Anything no rule names would go to the
-    first outbound, a blackhole, so no connection leaves directly. With hosts, outbounds whose
-    server they name look it up there (Android).
-    """
+    """Render an Xray config pinning one mixed listener on 127.0.0.1 to each outbound."""
     inbounds, rules = [], []
-    outbounds: List[dict] = [{"tag": _REFUSE_TAG, "protocol": "blackhole"}]
+    outbounds: List[dict] = [{"tag": "refuse", "protocol": "blackhole"}]
     for outbound, port in served:
         tag = outbound["tag"]
         inbounds.append({"tag": f"in-{tag}", "listen": LISTEN_HOST, "port": port, "protocol": "mixed", "settings": {}})
@@ -71,8 +67,7 @@ def render_xray_config(served: Sequence[Tuple[dict, int]], hosts: Optional[Dict[
         server = XrayCore.server_of(outbound)
         if hosts and isinstance(server, str) and server.lower() in hosts:
             outbound = copy.deepcopy(outbound)
-            stream = outbound.setdefault("streamSettings", {})
-            stream.setdefault("sockopt", {})["domainStrategy"] = "UseIP"
+            outbound.setdefault("streamSettings", {}).setdefault("sockopt", {})["domainStrategy"] = "UseIP"
         outbounds.append(outbound)
     config: Dict[str, Any] = {
         "log": {"loglevel": "warning", "access": "none"},
@@ -86,13 +81,12 @@ def render_xray_config(served: Sequence[Tuple[dict, int]], hosts: Optional[Dict[
 
 
 def _record(line: str) -> Tuple[Optional[str], str]:
-    """The level and message of one of Xray's log lines; (None, line) for other output."""
-    match = _LOG_LINE.match(line)
-    return (match.group(1).lower(), match.group(2)) if match else (None, line.strip())
+    m = _LOG_LINE.match(line)
+    return (m.group(1).lower(), m.group(2)) if m else (None, line.strip())
 
 
-class XrayCore(ProxyCore):
-    """Xray: outbounds tagged with nodesieve's names, a mixed inbound and a routing rule for each."""
+class XrayCore:
+    """Xray binary management, outbound conversion, and failure log analysis."""
 
     name = "xray"
     display = "Xray"
@@ -103,10 +97,7 @@ class XrayCore(ProxyCore):
         return XRAY_PATH
 
     def setup(self) -> None:
-        """Downloads the latest Xray release for this platform when the binary is absent.
-
-        The archive is checked against the SHA-256 the release publishes with it.
-        """
+        """Download and SHA-256-verify the latest Xray binary when absent."""
         if os.path.exists(XRAY_PATH):
             return
         asset = xray_asset()
@@ -122,31 +113,21 @@ class XrayCore(ProxyCore):
                 raise RuntimeError(f"the latest release has no {asset}")
             log.info(f"[*] Downloading {assets[asset]}...")
             archive = download(assets[asset])
-            expected = _sha256(download(assets[f"{asset}.dgst"], timeout=30.0).decode("utf-8", "replace"))
-            if expected is None:
+            dgst = download(assets[f"{asset}.dgst"], timeout=30.0).decode("utf-8", "replace")
+            match = re.search(r"^SHA2-256=\s*([0-9a-f]{64})\s*$", dgst, re.MULTILINE | re.IGNORECASE)
+            if not match:
                 raise RuntimeError(f"{asset}.dgst gives no SHA-256")
-            if hashlib.sha256(archive).hexdigest() != expected:
+            if hashlib.sha256(archive).hexdigest() != match.group(1).lower():
                 raise RuntimeError(f"{asset} does not match its SHA-256")
-            binary = "xray.exe" if os.name == "nt" else "xray"
             with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
-                data = bundle.read(binary)
-            directory = os.path.dirname(XRAY_PATH) or "."
-            fd, temporary = tempfile.mkstemp(prefix=".xray-", dir=directory)
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-                if os.name != "nt":
-                    os.chmod(temporary, 0o755)
-                os.replace(temporary, XRAY_PATH)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
+                data = bundle.read("xray.exe" if os.name == "nt" else "xray")
+            write_atomic(XRAY_PATH, data, mode=0o755)
         except Exception as e:
             log.error(f"[-] Failed to download Xray: {e}")
             sys.exit(1)
         log.info("[+] Xray setup complete.")
 
-    def proxy(self, link: str, config: dict) -> dict:
+    def proxy(self, link: str, config: Optional[dict] = None) -> dict:
         outbound = node_url_to_xray_outbound(link)
         if not outbound:
             raise ValueError("The link does not convert to an Xray outbound")
@@ -175,30 +156,32 @@ class XrayCore(ProxyCore):
 
     def refused(self, lines: Sequence[str], names: Sequence[str]) -> Optional[Tuple[int, str]]:
         for line in reversed(lines):
-            match = _REFUSED.search(_record(line)[1])
-            if match and match.group(1) in names:
-                return list(names).index(match.group(1)), f"Failed to build outbound: {match.group(2)[:300]}"
+            m = _REFUSED.search(_record(line)[1])
+            if m and m.group(1) in names:
+                return list(names).index(m.group(1)), f"Failed to build outbound: {m.group(2)[:300]}"
         return None
 
     def busy(self, lines: Sequence[str], listeners: Sequence[Tuple[str, int]]) -> Dict[int, str]:
-        ports = {port: index for index, (_, port) in enumerate(listeners)}
+        ports = {port: idx for idx, (_, port) in enumerate(listeners)}
         found = {}
         for line in lines:
-            message = _record(line)[1]
-            for port in _LISTEN_FAILED.findall(message):
+            msg = _record(line)[1]
+            for port in _LISTEN_FAILED.findall(msg):
                 if int(port) in ports:
-                    found[ports[int(port)]] = message[:300]
+                    found[ports[int(port)]] = msg[:300]
         return found
 
     def detail(self, lines: Sequence[str]) -> str:
-        crash = go_crash(lines)
-        if crash:
-            return crash
+        for line in lines:
+            if line.startswith(_GO_CRASH):
+                return line.strip()[:300]
         records = [_record(line) for line in lines]
-        for wanted in (lambda level, message: message.startswith("Failed to start"),
-                       lambda level, message: level == "error",
-                       lambda level, message: level == "warning" and "deprecated" not in message):
-            for level, message in reversed(records):
-                if wanted(level, message):
-                    return message[:300]
+        for match in (
+            lambda lv, msg: msg.startswith("Failed to start"),
+            lambda lv, msg: lv == "error",
+            lambda lv, msg: lv == "warning" and "deprecated" not in msg,
+        ):
+            for lv, msg in reversed(records):
+                if match(lv, msg):
+                    return msg[:300]
         return ""

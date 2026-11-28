@@ -1,142 +1,117 @@
-"""Basic URI parsing, protocol detection, host/port extraction, and node naming."""
+"""Shared URI parsing, protocol detection, host/port extraction, and node naming."""
 
 import base64
 import re
-import urllib.parse
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
+from urllib.parse import parse_qs, quote, unquote
 
 from nodesieve.parsers.hysteria2 import HYSTERIA2_SCHEMES, parse_hysteria2
 
 SHARE_SCHEMES = frozenset(("vless", "trojan", "ss", *HYSTERIA2_SCHEMES))
+_FLAG_TAIL = re.compile(r"\s*[\U0001F1E6-\U0001F1FF]{2}.*$")
+
+
+def b64decode_str(text: str) -> str:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode("utf-8")
+
+
+def parse_share_link(url: str) -> Optional[Tuple[str, str, str, int, Dict[str, str]]]:
+    """Parse a non-Hysteria2 share link into (scheme, user, server, port, query), or None."""
+    core, _, query_text = url.split("#", 1)[0].partition("?")
+    scheme, sep, authority = core.partition("://")
+    if not sep:
+        return None
+    scheme = scheme.lower()
+    query = {k: v[0] for k, v in parse_qs(query_text, keep_blank_values=True).items()}
+    authority = authority.rstrip("/")
+    try:
+        if scheme == "ss" and "@" not in authority:
+            authority = b64decode_str(authority)
+        user, at, host_port = authority.rpartition("@")
+        if not at:
+            return None
+        host, colon, port_s = host_port.rpartition(":")
+        if not colon or not host:
+            return None
+        server, port = host.strip("[]"), int(port_s)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not server or not 0 < port <= 65535:
+        return None
+    return scheme, unquote(user), server, port, query
+
+
+def normalize_share_link(node: object) -> Optional[str]:
+    """Validate a single-line supported share link and normalize its fragment encoding."""
+    if not isinstance(node, str) or any(ord(c) < 32 or ord(c) == 127 for c in node):
+        return None
+    core, sep, fragment = node.strip().partition("#")
+    if any(c.isspace() for c in core) or core.partition("://")[0].lower() not in SHARE_SCHEMES:
+        return None
+    return core + ("#" + quote(unquote(fragment), safe="") if sep else "")
 
 
 def node_key(node: str) -> str:
-    """Identify duplicate links across display names and Hysteria 2 scheme aliases."""
+    """Deduplication key ignoring display names and Hysteria 2 scheme aliases."""
     core = node.partition("#")[0]
     scheme, _, rest = core.partition("://")
     return "hysteria2://" + rest if scheme.lower() in HYSTERIA2_SCHEMES else core
 
 
 def get_flag_emoji(country_code: str) -> str:
-    """Converts a 2-letter ISO country code into Unicode flag emoji."""
-    if not country_code:
+    if not country_code or len(country_code) != 2:
         return ""
-    country_code = country_code.upper()
-    if len(country_code) != 2:
-        return ""
-    return chr(ord(country_code[0]) + 127397) + chr(ord(country_code[1]) + 127397)
+    cc = country_code.upper()
+    return chr(ord(cc[0]) + 127397) + chr(ord(cc[1]) + 127397)
 
 
 def get_node_name(node_uri: str) -> str:
-    """Extracts decoded node tag/name from URI fragment."""
-    if "#" in node_uri:
-        return urllib.parse.unquote(node_uri.split("#", 1)[1])
-    return "Unknown Node"
+    return unquote(node_uri.split("#", 1)[1]) if "#" in node_uri else "Unknown Node"
 
 
 def extract_node_protocol(node_uri: str) -> str:
-    """Identifies node protocol (VLESS, TROJAN, SS, etc.)."""
-    if "://" in node_uri:
-        proto = node_uri.split("://", 1)[0].upper()
-        if proto == "SHADOWSOCKS":
-            return "SS"
-        if proto == "HY2":
-            return "HYSTERIA2"
-        return proto
-    return "VPN"
+    if "://" not in node_uri:
+        return "VPN"
+    proto = node_uri.split("://", 1)[0].upper()
+    return {"SHADOWSOCKS": "SS", "HY2": "HYSTERIA2"}.get(proto, proto)
+
+
+def extract_host_port(node_uri: str) -> Tuple[Optional[str], Optional[int]]:
+    """Extract (host, port) from any supported proxy URI."""
+    if extract_node_protocol(node_uri) == "HYSTERIA2":
+        link = parse_hysteria2(node_uri)
+        return (link.server, link.port) if link else (None, None)
+    parsed = parse_share_link(node_uri)
+    return (parsed[2], parsed[3]) if parsed else (None, None)
 
 
 def format_descriptive_node_name(
     node: str,
-    country_code: str,
-    country_name: str,
+    country_code: Optional[str],
+    country_name: Optional[str],
     ip_str: str,
-    loc_score: float = 0.0,
     speed_mbps: Optional[float] = None,
 ) -> str:
-    """Constructs a clean, standardized, descriptive name tag for a validated node."""
+    """Build a clean, idempotent descriptive display name for a validated node."""
     proto = extract_node_protocol(node)
-
-    orig_tag = ""
+    orig_tag = "Node"
     if "#" in node:
-        raw_tag = urllib.parse.unquote(node.split("#", 1)[1])
-        proto_tag_match = re.search(r"\[[A-Za-z0-9_-]+:\s*([^\[\]]+)\]", raw_tag, flags=re.IGNORECASE)
-        if proto_tag_match:
-            orig_tag = proto_tag_match.group(1).strip()
-            while re.match(r"^\[[A-Za-z0-9_-]+:\s*(.+)\]$", orig_tag, flags=re.IGNORECASE):
-                orig_tag = re.match(r"^\[[A-Za-z0-9_-]+:\s*(.+)\]$", orig_tag, flags=re.IGNORECASE).group(1).strip()
-            orig_tag = re.sub(r"\s*[\U0001F1E6-\U0001F1FF]{2}.*$", "", orig_tag).strip()
-            orig_tag = orig_tag if orig_tag else "Node"
+        raw = unquote(node.split("#", 1)[1])
+        m = re.search(r"\[[A-Za-z0-9_-]+:\s*([^\[\]]+)\]", raw, flags=re.IGNORECASE)
+        if m:
+            cleaned = m.group(1).strip()
+            while inner := re.match(r"^\[[A-Za-z0-9_-]+:\s*(.+)\]$", cleaned, flags=re.IGNORECASE):
+                cleaned = inner.group(1).strip()
         else:
-            cleaned = re.sub(
-                r"^\s*\[(?:⚡|[\d\.]+\s*MB/s|[A-Za-z0-9_-]+).*?\]\s*",
-                "",
-                raw_tag,
-                flags=re.IGNORECASE,
-            )
-            cleaned = re.sub(r"^[\U0001F1E6-\U0001F1FF]{2}[-\s]*", "", cleaned).strip()
-            cleaned = cleaned.split("|")[0].strip()
-            cleaned = re.sub(r"\s*[\U0001F1E6-\U0001F1FF]{2}.*$", "", cleaned).strip()
-            orig_tag = cleaned if cleaned else "Node"
-    else:
-        orig_tag = "Node"
+            cleaned = re.sub(r"^\s*\[(?:⚡|[\d\.]+\s*MB/s|[A-Za-z0-9_-]+).*?\]\s*", "", raw, flags=re.IGNORECASE)
+            cleaned = re.sub(r"^[\U0001F1E6-\U0001F1FF]{2}[-\s]*", "", cleaned).split("|")[0].strip()
+        orig_tag = _FLAG_TAIL.sub("", cleaned).strip() or "Node"
 
     flag = get_flag_emoji(country_code) if country_code else "🌐"
     c_name = (country_name or country_code or "Unknown").replace(" ", "-")
-
     parts = [f"[{proto}: {orig_tag}] {flag} {c_name}"]
-
     if speed_mbps is not None and speed_mbps > 0:
         parts.append(f"⚡ {speed_mbps:.1f} MB/s")
-
-    if loc_score > 0:
-        parts.append(f"LOC: {loc_score*100:.0f}%")
-
     if ip_str:
         parts.append(ip_str)
-
     return " | ".join(parts)
-
-
-def extract_host_port(node_uri: str) -> Tuple[Optional[str], Optional[int]]:
-    """Extracts server host/IP and integer port from any supported proxy URI scheme."""
-    try:
-        if extract_node_protocol(node_uri) == "HYSTERIA2":
-            link = parse_hysteria2(node_uri)
-            return (link.server, link.port) if link else (None, None)
-        clean_uri = node_uri.split("#", 1)[0].split("?", 1)[0]
-        if "://" not in clean_uri:
-            return None, None
-
-        _, netloc = clean_uri.split("://", 1)
-        if not netloc:
-            return None, None
-
-        if "@" in netloc:
-            host_port = netloc.rsplit("@", 1)[-1]
-        else:
-            try:
-                b64_str = netloc + "=" * ((4 - len(netloc) % 4) % 4)
-                decoded = base64.urlsafe_b64decode(b64_str).decode("utf-8")
-                if "@" in decoded:
-                    host_port = decoded.rsplit("@", 1)[-1]
-                else:
-                    return None, None
-            except Exception:
-                return None, None
-
-        if "]" in host_port:
-            host, port_str = host_port.rsplit(":", 1)
-            host = host.strip("[]")
-            port = int(port_str)
-        elif ":" in host_port:
-            host, port_str = host_port.rsplit(":", 1)
-            port = int(port_str)
-        else:
-            return None, None
-
-        if 0 < port <= 65535:
-            return host, port
-        return None, None
-    except Exception:
-        return None, None

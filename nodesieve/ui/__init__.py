@@ -3,7 +3,4 @@
 from nodesieve.ui.cli import main
 from nodesieve.ui.dashboard import VPNDashboard
 
-__all__ = [
-    "VPNDashboard",
-    "main",
-]
+__all__ = ["VPNDashboard", "main"]

@@ -1,4 +1,4 @@
-"""Node testing routines: TCP ping, exit IP and country resolution, GeoIP location consensus, and speedtests."""
+"""Node testing: TCP ping, exit IP/country checks, GeoIP consensus, and speedtests."""
 
 import asyncio
 import re
@@ -8,8 +8,9 @@ from typing import Optional, Set, Tuple
 import aiohttp
 
 from nodesieve.constants import GEOBLOCKED_REGIONS
-from nodesieve.core.batch import CoreInstanceLost, CoreRunner, NodeEndpoint, core_for
+from nodesieve.core.batch import CoreInstanceLost, CoreRunner, NodeEndpoint
 from nodesieve.geo import GeolocationService
+from nodesieve.location import probe_location
 from nodesieve.logging import ErrorTracker, safe_close_writer, safe_print
 from nodesieve.parsers.base import (
     extract_host_port,
@@ -17,15 +18,10 @@ from nodesieve.parsers.base import (
     format_descriptive_node_name,
     get_node_name,
 )
-from nodesieve.parsers.mihomo import node_url_to_mihomo_dict, without_mux
 from nodesieve.routing import main_policy_failure, normalize_routing
-from nodesieve.location import probe_location
 
-# Cloudflare's trace endpoint by address, one per IP family.
 TRACE_URL_IPV4 = "https://1.1.1.1/cdn-cgi/trace"
 TRACE_URL_IPV6 = "https://[2606:4700:4700::1111]/cdn-cgi/trace"
-
-# Speedtest payloads and sampling bounds.
 SPEEDTEST_URLS = (
     "https://speed.cloudflare.com/__down?bytes=100000000",
     "http://proof.ovh.net/files/100Mb.dat",
@@ -38,46 +34,59 @@ SPEEDTEST_EARLY_STOP_STEADY_BYTES = 20 * 1024 * 1024
 SPEEDTEST_MIN_BYTES = 65536
 
 
+def parse_cf_trace(text: str) -> Tuple[Optional[str], Optional[str]]:
+    ip_m = re.search(r"(?:^|\n)ip=([^\r\n]+)", text)
+    loc_m = re.search(r"(?:^|\n)loc=([^\r\n]+)", text)
+    return (ip_m.group(1).strip() if ip_m else None), (loc_m.group(1).strip().upper() if loc_m else None)
+
+
 class NodeTester:
-    """Runs the IP check (reachability, exit IP, location) and speedtests against candidate VPN proxy nodes."""
+    """Runs TCP reachability, exit IP/location checks, and speedtests on proxy nodes."""
 
     BLOCKED_REGIONS: Set[str] = GEOBLOCKED_REGIONS
 
-    def __init__(
-        self,
-        config: dict,
-        total_nodes: int = 0,
-        real_ip: Optional[str] = None,
-    ):
+    def __init__(self, config: dict, total_nodes: int = 0, real_ip: Optional[str] = None):
         self.config = config
         if self.config.get("routing", {}).get("enabled", False):
             self.config["routing"] = normalize_routing(self.config["routing"])
         self.total_nodes = total_nodes
         self.real_ip = real_ip
         self.node_metadata: dict = {}
-        # Working nodes that were offered multiplexing, and how many of them answered through it.
-        self.mux_offered = 0
-        self.mux_supported = 0
-
-        # Nodes whose GeoIP providers are asked at once, each with up to
-        # location.REQUESTS_PER_NODE requests in flight.
         self._location_semaphore = asyncio.Semaphore(6)
 
-    async def async_check_tcp_node(self, node: str, timeout: float = 1.5) -> Optional[str]:
-        """Check TCP reachability where applicable. QUIC is tested by the core in phase 1."""
-        node_name = get_node_name(node)
-        if "Авто" in node_name or "⬇" in node_name:
-            return None
+    @staticmethod
+    def _is_header_node(node: str) -> bool:
+        name = get_node_name(node)
+        return "Авто" in name or "⬇" in name
 
+    @staticmethod
+    def _as_checked(node: str) -> str:
+        return re.sub(r"encryption=[^&#]+", "encryption=none", node) if node.startswith("vless://") else node
+
+    def check_link(self, node: str) -> Optional[str]:
+        """Link to serve for the Phase 1 IP check, or None if filtered out before Xray."""
+        node = self._as_checked(node)
+        if self._is_header_node(node):
+            return None
+        host, port = extract_host_port(node)
+        return node if host and port else None
+
+    def speedtest_link(self, node: str) -> Optional[str]:
+        node = self._as_checked(node)
+        host, port = extract_host_port(node)
+        return node if host and port else None
+
+    async def async_check_tcp_node(self, node: str, timeout: float = 1.5) -> Optional[str]:
+        """Phase 0 TCP reachability filter; valid Hysteria 2 nodes proceed directly to QUIC."""
+        if self._is_header_node(node):
+            return None
         host, port = extract_host_port(node)
         if not host or not port:
             return None
         if extract_node_protocol(node) == "HYSTERIA2":
             return node
-
         try:
-            fut = asyncio.open_connection(host, port)
-            reader, writer = await asyncio.wait_for(fut, timeout=timeout)
+            _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
             await safe_close_writer(writer)
             return node
         except Exception as e:
@@ -85,171 +94,56 @@ class NodeTester:
             return None
 
     async def _fetch_ip(
-        self,
-        url: str,
-        proxy: str,
-        session: Optional[aiohttp.ClientSession] = None,
+        self, url: str, proxy: str, session: Optional[aiohttp.ClientSession] = None,
     ) -> Tuple[Optional[str], Optional[str], float]:
-        """Queries Cloudflare trace endpoint via proxy to extract outgoing IP, ISO country, and latency."""
+        """Query Cloudflare trace via proxy for (exit_ip, country_code, latency_ms)."""
         is_v6 = "2606:4700:4700::1111" in url
-
-        # IPv6 MUST NOT fallback to dual-stack domain because that returns IPv4 and corrupts IPv6 detection
-        urls = [url]
-        if not is_v6 and ("1.1.1.1" in url):
-            urls.append("https://cloudflare.com/cdn-cgi/trace")
-
-        close_session = False
+        # Never fall back to dual-stack domain for IPv6 (it would return IPv4).
+        urls = [url] + (["https://cloudflare.com/cdn-cgi/trace"] if not is_v6 and "1.1.1.1" in url else [])
+        close_session = session is None
         if session is None:
-            connector = aiohttp.TCPConnector(ssl=False)
-            timeout_obj = aiohttp.ClientTimeout(total=3.5 if is_v6 else 4.5, connect=2.5)
-            session = aiohttp.ClientSession(connector=connector, timeout=timeout_obj)
-            close_session = True
-
+            session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False),
+                timeout=aiohttp.ClientTimeout(total=3.5 if is_v6 else 4.5, connect=2.5),
+            )
         try:
+            req_timeout = aiohttp.ClientTimeout(total=3.0 if is_v6 else 4.0, connect=2.5)
             for u in urls:
-                req_start = time.perf_counter()
+                t0 = time.perf_counter()
                 try:
-                    req_timeout = aiohttp.ClientTimeout(total=3.0 if is_v6 else 4.0, connect=2.5)
                     async with session.get(u, proxy=proxy, timeout=req_timeout) as resp:
                         if resp.status == 200:
-                            text = await resp.text()
-                            latency = (time.perf_counter() - req_start) * 1000
-                            ip_match = re.search(r"(?:^|\n)ip=([^\r\n]+)", text)
-                            loc_match = re.search(r"(?:^|\n)loc=([^\r\n]+)", text)
-                            if ip_match and loc_match:
-                                ip_val = ip_match.group(1).strip()
-                                loc_val = loc_match.group(1).strip().upper()
-                                if is_v6:
-                                    if ":" in ip_val:
-                                        return ip_val, loc_val, latency
-                                else:
-                                    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip_val):
-                                        return ip_val, loc_val, latency
-                                    elif ":" not in ip_val:
-                                        return ip_val, loc_val, latency
+                            ip_val, loc_val = parse_cf_trace(await resp.text())
+                            latency = (time.perf_counter() - t0) * 1000
+                            if ip_val and loc_val and ((":" in ip_val) == is_v6):
+                                return ip_val, loc_val, latency
                 except Exception:
                     pass
         finally:
             if close_session:
                 await session.close()
-
         return None, None, 99999.0
 
     async def fetch_location(
         self, base_port: int, ipv4_ip: Optional[str] = None, ipv6_ip: Optional[str] = None,
     ) -> dict:
-        """Collect independent GeoIP votes through this node's local listener.
-
-        The families the Cloudflare trace reached the node in need a consensus; the
-        addresses the providers look up are found by the probe itself.
-        """
-        families = [family for family, address in (("ipv4", ipv4_ip), ("ipv6", ipv6_ip)) if address]
+        families = [f for f, ip in (("ipv4", ipv4_ip), ("ipv6", ipv6_ip)) if ip]
         async with self._location_semaphore:
             return await probe_location(f"http://127.0.0.1:{base_port}", families=families, real_ip=self.real_ip)
-
-    async def fetch_loc_score(
-        self, base_port: int, allowed: list,
-        ipv4_ip: Optional[str] = None, ipv6_ip: Optional[str] = None,
-    ) -> float:
-        """Legacy allowed-country agreement score, using the GeoIP providers' reports."""
-        if not allowed:
-            return 0.0
-        evidence = await self.fetch_location(base_port, ipv4_ip, ipv6_ip)
-        if evidence.get("status") == "failed" or not evidence.get("total"):
-            return 0.0
-        accepted = {country.upper() for country in allowed}
-        return sum(count for country, count in evidence["counts"].items() if country in accepted) / evidence["total"]
-
-    def _mux_applies(self, node: str) -> bool:
-        """Whether use_mux would give this node's Mihomo proxy (the feed's Clash profile) multiplexing."""
-        if not self.config.get("use_mux", True):
-            return False
-        proxy = node_url_to_mihomo_dict(node, use_mux=True)
-        return bool(proxy and "smux" in proxy)
-
-    @staticmethod
-    def _as_checked(node: str) -> str:
-        """The link as the core gets it: VLESS with encryption=none."""
-        if node.startswith("vless://"):
-            return re.sub(r"encryption=[^&#]+", "encryption=none", node)
-        return node
-
-    def check_links(self, node: str) -> Optional[Tuple[str, Optional[str]]]:
-        """What the IP check needs the core to serve for a node: the link the node is checked
-        with, and the same node with multiplexing for the probe, or None for no probe.
-
-        None instead of the pair when the node is turned away before any core is needed.
-        """
-        node = self._as_checked(node)
-        node_name = get_node_name(node)
-        if "Авто" in node_name or "⬇" in node_name:
-            return None
-        host, port = extract_host_port(node)
-        if not host or not port:
-            return None
-        # Multiplexing (sing-mux) works only when the server supports it, which a link does
-        # not say, and a server without it drops every connection. So the node is checked
-        # without multiplexing and keeps it only if it then answers a request through it.
-        # Only Mihomo speaks sing-mux, so only a Mihomo scan can probe it. Steer connects
-        # with its own core and takes no multiplexing from this checker.
-        if not self._mux_applies(node):
-            return node, None
-        return without_mux(node), (node if self._probes_mux() else None)
-
-    def _probes_mux(self) -> bool:
-        """Whether the IP check asks a working node for a request through multiplexing."""
-        routing_enabled = self.config.get("routing", {}).get("enabled", False)
-        return not routing_enabled and core_for(self.config).name == "mihomo"
-
-    def speedtest_links(self, node: str) -> Optional[Tuple[str, Optional[str]]]:
-        """The link the speedtest has the core serve for a node, as check_links gives it; None when there is none."""
-        node = self._as_checked(node)
-        host, port = extract_host_port(node)
-        return (node, None) if host and port else None
-
-    async def _answers_multiplexed(
-        self, idx: int, node: str, trace_url: str, endpoint: Optional[NodeEndpoint] = None,
-    ) -> bool:
-        """Whether a working node also answers with multiplexing, which only a server that supports it does."""
-        try:
-            async with CoreRunner(
-                node=node, config=self.config, temp_prefix="mux_core_", node_idx=idx, endpoint=endpoint,
-            ) as runner:
-                ip, _, _ = await self._fetch_ip(trace_url, runner.proxy_url)
-                if not ip:
-                    await runner.ensure_alive()
-                return bool(ip)
-        except CoreInstanceLost as lost:
-            if lost.retry:
-                raise
-            ErrorTracker.record_error("Mux Probe", lost)
-            return False
-        except Exception as e:
-            ErrorTracker.record_error("Mux Probe", e)
-            return False
 
     async def test_node_full(
         self, idx: int, node: str, endpoint: Optional[NodeEndpoint] = None,
     ) -> Optional[Tuple[str, float, str]]:
-        """Phase 1 IP check: verifies the node's exit IP and location through a local core.
-
-        endpoint is the node's listener on a shared core instance, serving the links
-        check_links gives; without one, the node gets an instance of its own for the check.
-        Raises CoreInstanceLost (with retry) when a shared instance exited during the check,
-        as any of its nodes may have made it: the node is then to be checked again alone.
-        """
+        """Phase 1 exit IP, leak, and country/GeoIP verification."""
         original_node = node
         routing_enabled = self.config.get("routing", {}).get("enabled", False)
-        links = self.check_links(node)
-        if links is None:
+        checked = self.check_link(node)
+        if checked is None:
             return None
-        checked_link, mux_link = links
-        node = self._as_checked(node)
+        node = checked
         node_name = get_node_name(node)
-        host, port = extract_host_port(node)
 
         async def drop(label: str, reason: str, **details) -> None:
-            # A core that exited fails a node too, which is not the node's doing.
             await runner.ensure_alive()
             safe_print(f"[-] Node {idx}/{self.total_nodes} [{node_name}] -> Dropped ({label})")
             self.node_metadata[node] = self.node_metadata[original_node] = {
@@ -258,165 +152,65 @@ class NodeTester:
 
         try:
             async with CoreRunner(
-                node=checked_link,
-                config=self.config,
-                temp_prefix="core_",
-                node_idx=idx,
-                total_nodes=self.total_nodes,
-                endpoint=endpoint,
+                node=node, config=self.config, temp_prefix="core_",
+                node_idx=idx, total_nodes=self.total_nodes, endpoint=endpoint,
             ) as runner:
-                proxy_url = runner.proxy_url
-                base_port = runner.port
-
                 connector = aiohttp.TCPConnector(ssl=bool(routing_enabled), limit=10)
-                timeout_obj = aiohttp.ClientTimeout(total=6.0, connect=4.0)
                 async with aiohttp.ClientSession(
-                    connector=connector,
-                    timeout=timeout_obj,
-                    max_line_size=65536,
-                    max_field_size=65536,
+                    connector=connector, timeout=aiohttp.ClientTimeout(total=6.0, connect=4.0),
+                    max_line_size=65536, max_field_size=65536,
                 ) as session:
-                    # Concurrently query IPv4 and IPv6 endpoints on shared session
-                    v4_task = self._fetch_ip(TRACE_URL_IPV4, proxy_url, session=session)
-                    v6_task = self._fetch_ip(TRACE_URL_IPV6, proxy_url, session=session)
+                    (ipv4_ip, ipv4_loc, v4_lat), (ipv6_ip, ipv6_loc, v6_lat) = await asyncio.gather(
+                        self._fetch_ip(TRACE_URL_IPV4, runner.proxy_url, session=session),
+                        self._fetch_ip(TRACE_URL_IPV6, runner.proxy_url, session=session),
+                    )
 
-                    results = await asyncio.gather(v4_task, v6_task)
-                    ipv4_ip, ipv4_loc, v4_lat = results[0]
-                    ipv6_ip, ipv6_loc, v6_lat = results[1]
-
-                # Early abort if node has no outbound internet connectivity. The Steer
-                # main pool relies on the GeoIP probe's own exit discovery instead of this trace.
                 if not routing_enabled and not ipv4_ip and not ipv6_ip:
                     await drop("No outbound internet", "No outbound internet connectivity")
                     return None
-
-                if self.real_ip and (ipv4_ip == self.real_ip or ipv6_ip == self.real_ip):
+                if self.real_ip and self.real_ip in (ipv4_ip, ipv6_ip):
                     await drop("IP leak", "Proxy leaks real IP")
                     return None
 
                 latency = min(v4_lat, v6_lat)
-                ip_mode = self.config.get("ip_mode", "off")
-
-                if ip_mode == "two_ips" and not (ipv4_loc and ipv6_loc):
-                    await runner.ensure_alive()
-                    return None
-                elif ip_mode == "one_ip" and not (bool(ipv4_loc) ^ bool(ipv6_loc)):
-                    await runner.ensure_alive()
-                    return None
-
-                eff_v4 = ipv4_ip
                 location = None
-                loc_score = 0.0
 
                 if routing_enabled:
-                    # Steer main pool: GeoIP consensus decides, per IP family.
-                    location = await self.fetch_location(base_port, ipv4_ip, ipv6_ip)
-                    loc_score = location.get("score", 0.0)
+                    location = await self.fetch_location(runner.port, ipv4_ip, ipv6_ip)
                     if location.get("ip_leak"):
-                        await drop("IP leak", "Proxy leaks real IP", location=location, loc_score=loc_score)
+                        await drop("IP leak", "Proxy leaks real IP", location=location)
                         return None
-                    # A tied/unknown consensus must not keep an earlier
-                    # single-provider country label as if it had won.
                     country_code = location.get("country")
                     failure = main_policy_failure(self.config["routing"]["main"], location)
                     if failure:
                         if location.get("reason"):
                             failure += ": " + location["reason"]
-                        await drop(failure, failure, country_code=country_code, location=location, loc_score=loc_score)
+                        await drop(failure, failure, country_code=country_code, location=location)
                         return None
                 else:
-                    allowed = [c.upper() for c in self.config.get("allowed_countries", [])]
-                    if not eff_v4 and host and re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
-                        eff_v4 = host
-
                     country_code = ipv4_loc or ipv6_loc
-                    if not country_code and eff_v4:
-                        country_code = await GeolocationService.get_ip_country(eff_v4)
-
                     if not country_code:
-                        loc_reason = "Could not determine node location"
-                        await drop(loc_reason, loc_reason)
+                        await drop("Could not determine node location", "Could not determine node location")
                         return None
-
-                    is_valid_location = True
-                    if country_code in self.BLOCKED_REGIONS:
-                        is_valid_location = False
-                    if ipv4_loc and ipv4_loc in self.BLOCKED_REGIONS:
-                        is_valid_location = False
-                    if ipv6_loc and ipv6_loc in self.BLOCKED_REGIONS:
-                        is_valid_location = False
-                    if allowed:
-                        if ipv4_loc and ipv4_loc not in allowed:
-                            is_valid_location = False
-                        if ipv6_loc and ipv6_loc not in allowed:
-                            is_valid_location = False
-                        if country_code and country_code not in allowed:
-                            is_valid_location = False
-
-                    if not is_valid_location:
-                        loc_reason = (
-                            f"Geo-blocked region ({country_code})"
-                            if country_code in self.BLOCKED_REGIONS
-                            else f"Location not allowed ({country_code})"
-                        )
-                        await drop(loc_reason, loc_reason, country_code=country_code)
+                    locs = [c for c in (country_code, ipv4_loc, ipv6_loc) if c]
+                    allowed = {c.upper() for c in self.config.get("allowed_countries", [])}
+                    blocked = next((c for c in locs if c in self.BLOCKED_REGIONS), None)
+                    disallowed = next((c for c in locs if allowed and c not in allowed), None)
+                    if blocked or disallowed:
+                        reason = f"Geo-blocked region ({blocked})" if blocked else f"Location not allowed ({disallowed})"
+                        await drop(reason, reason, country_code=country_code)
                         return None
-
-                    if allowed and self.config.get("enable_loc_ranking", False):
-                        loc_score = await self.fetch_loc_score(base_port, allowed, eff_v4, ipv6_ip)
-                        if not loc_score:
-                            await runner.ensure_alive()
-
-            # The node qualifies. An instance of its own is closed by now, so the multiplexing
-            # probe starts the next one rather than a second; a shared instance serves the
-            # probe's link as well.
-            link = node
-            if mux_link is None and self._mux_applies(node) and not routing_enabled:
-                # The core can't probe multiplexing, so the node goes on without it.
-                link = without_mux(node)
-            elif mux_link is not None:
-                answered = await self._answers_multiplexed(
-                    idx, mux_link, TRACE_URL_IPV4 if ipv4_ip else TRACE_URL_IPV6,
-                    endpoint.mux if endpoint is not None else None,
-                )
-                self.mux_offered += 1
-                if answered:
-                    self.mux_supported += 1
-                else:
-                    link = without_mux(node)
 
             country_name = await GeolocationService.get_country_name(country_code)
-
-            display_ip = []
-            if ipv4_ip:
-                display_ip.append(ipv4_ip)
-            if ipv6_ip and ipv6_ip != ipv4_ip:
-                display_ip.append(ipv6_ip)
-            ip_str = " | ".join(display_ip) if display_ip else (eff_v4 or "")
-
-            meta = {
-                "country_code": country_code,
-                "country_name": country_name,
-                "latency_ms": latency,
-                "location": location,
-                "loc_score": loc_score,
-            }
-
-            new_name = format_descriptive_node_name(
-                node=node,
-                country_code=country_code,
-                country_name=country_name,
-                ip_str=ip_str,
-                loc_score=0.0 if routing_enabled else loc_score,
-            )
+            ips = list(dict.fromkeys(ip for ip in (ipv4_ip, ipv6_ip) if ip))
+            new_name = format_descriptive_node_name(node, country_code, country_name, " | ".join(ips))
             if location is not None:
                 new_name += (f" | Location {location.get('country') or 'unknown'} "
-                             f"{loc_score:.0%} ({location.get('votes', 0)}/{location.get('total', 0)} votes)")
-            supported_node = f"{link.split('#', 1)[0]}#{urllib.parse.quote(new_name)}"
-            self.node_metadata[node] = meta
-            self.node_metadata[original_node] = meta
-            self.node_metadata[supported_node] = meta
-
+                             f"{location.get('score', 0.0):.0%} ({location.get('votes', 0)}/{location.get('total', 0)} votes)")
+            supported_node = f"{node.split('#', 1)[0]}#{urllib.parse.quote(new_name)}"
+            meta = {"country_code": country_code, "country_name": country_name,
+                    "latency_ms": latency, "location": location}
+            self.node_metadata[node] = self.node_metadata[original_node] = self.node_metadata[supported_node] = meta
             safe_print(f"[*] Node {idx}/{self.total_nodes} -> {new_name}")
             return supported_node, latency, node
         except CoreInstanceLost as lost:
@@ -429,110 +223,54 @@ class NodeTester:
             return None
 
     async def speedtest_node(
-        self,
-        idx: int,
-        node: str,
-        timeout: int,
-        endpoint: Optional[NodeEndpoint] = None,
-    ) -> Optional[Tuple[str, float, float]]:
-        """Phase 2 Speedtest: Downloads payload chunks through the node to calculate sustained throughput.
-
-        endpoint, a shared core instance, and CoreInstanceLost work as in test_node_full.
-        """
-        links = self.speedtest_links(node)
-        if links is None:
+        self, idx: int, node: str, timeout: int, endpoint: Optional[NodeEndpoint] = None,
+    ) -> Optional[Tuple[str, float]]:
+        """Phase 2 sustained throughput speedtest, excluding TCP slow-start warmup and teardown."""
+        node = self.speedtest_link(node)
+        if node is None:
             return None
-        node = links[0]
-        host, port = extract_host_port(node)
         node_name = get_node_name(node)
 
         try:
             async with CoreRunner(
-                node=node,
-                config=self.config,
-                temp_prefix="speed_core_",
-                node_idx=idx,
-                total_nodes=self.total_nodes,
-                endpoint=endpoint,
+                node=node, config=self.config, temp_prefix="speed_core_",
+                node_idx=idx, total_nodes=self.total_nodes, endpoint=endpoint,
             ) as runner:
-                proxy_url = runner.proxy_url
-                base_port = runner.port
-
-                allowed_countries = [c.upper() for c in self.config.get("allowed_countries", [])]
-
-                connector = aiohttp.TCPConnector(ssl=bool(self.config.get("routing", {}).get("enabled", False)), limit=10)
-                session_timeout = aiohttp.ClientTimeout(total=max(timeout, 10), connect=4.0)
                 async with aiohttp.ClientSession(
-                    connector=connector,
-                    timeout=session_timeout,
-                    max_line_size=65536,
-                    max_field_size=65536,
+                    connector=aiohttp.TCPConnector(ssl=False, limit=10),
+                    timeout=aiohttp.ClientTimeout(total=max(timeout, 10), connect=4.0),
+                    max_line_size=65536, max_field_size=65536,
                 ) as session:
-                    ipv4_ip = None
-                    ipv6_ip = None
-                    if host and re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
-                        ipv4_ip = host
-                    else:
-                        ip_match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", node)
-                        if ip_match:
-                            ipv4_ip = ip_match.group(0)
-
                     speed_bps = 0.0
-                    loc_score = 0.0
-                    if "LOC: " in node_name:
-                        try:
-                            existing_str = node_name.split("LOC: ")[1].split("%")[0]
-                            loc_score = float(existing_str) / 100.0
-                        except Exception:
-                            pass
+                    max_dur = min(float(timeout), SPEEDTEST_MAX_DURATION)
+                    warmup = min(SPEEDTEST_WARMUP_SECONDS, max_dur * 0.25)
+                    req_timeout = aiohttp.ClientTimeout(total=max_dur + 3.0, connect=3.5, sock_read=4.0)
 
-                    max_duration = min(float(timeout), SPEEDTEST_MAX_DURATION)
-                    warmup = min(SPEEDTEST_WARMUP_SECONDS, max_duration * 0.25)
                     for test_url in SPEEDTEST_URLS:
-                        first_byte_time = None
-                        last_byte_time = None
-                        bytes_after_first = 0
-                        steady_start = None
-                        steady_bytes = 0
+                        t_first = t_last = t_steady = None
+                        total_bytes = steady_bytes = 0
                         errored = False
                         try:
-                            req_timeout = aiohttp.ClientTimeout(
-                                total=max_duration + 3.0, connect=3.5, sock_read=4.0,
-                            )
-                            async with session.get(test_url, proxy=proxy_url, timeout=req_timeout) as resp:
+                            async with session.get(test_url, proxy=runner.proxy_url, timeout=req_timeout) as resp:
                                 if resp.status == 200:
                                     async for chunk in resp.content.iter_chunked(131072):
                                         now = time.perf_counter()
-                                        if first_byte_time is None:
-                                            first_byte_time = now
-                                            last_byte_time = now
+                                        if t_first is None:
+                                            t_first = t_last = now
                                             continue
-                                        bytes_after_first += len(chunk)
-                                        last_byte_time = now
-                                        download_elapsed = now - first_byte_time
-
-                                        if steady_start is None:
-                                            if download_elapsed >= warmup:
-                                                steady_start = now
+                                        total_bytes += len(chunk)
+                                        t_last = now
+                                        elapsed = now - t_first
+                                        if t_steady is None:
+                                            if elapsed >= warmup:
+                                                t_steady = now
                                         else:
                                             steady_bytes += len(chunk)
-
-                                        if download_elapsed >= max_duration:
-                                            break
-
-                                        # Abort early on crawling transfers after 2 seconds
-                                        if (
-                                            download_elapsed > 2.0
-                                            and (bytes_after_first / download_elapsed / 1024 / 1024) < 0.05
-                                        ):
-                                            break
-
-                                        # Sufficient steady-state sample obtained for fast nodes
-                                        if (
-                                            steady_start is not None
-                                            and (now - steady_start) >= SPEEDTEST_EARLY_STOP_STEADY_SECONDS
-                                            and steady_bytes >= SPEEDTEST_EARLY_STOP_STEADY_BYTES
-                                        ):
+                                        if (elapsed >= max_dur
+                                                or (elapsed > 2.0 and total_bytes / elapsed / 1048576 < 0.05)
+                                                or (t_steady is not None
+                                                    and now - t_steady >= SPEEDTEST_EARLY_STOP_STEADY_SECONDS
+                                                    and steady_bytes >= SPEEDTEST_EARLY_STOP_STEADY_BYTES)):
                                             break
                         except Exception as e:
                             errored = True
@@ -540,69 +278,35 @@ class NodeTester:
 
                         if errored:
                             await runner.ensure_alive()
-
-                        end_time = (
-                            last_byte_time
-                            if not errored and last_byte_time is not None
-                            else time.perf_counter()
-                        )
-                        if steady_start is not None and steady_bytes >= SPEEDTEST_MIN_BYTES:
-                            steady_duration = end_time - steady_start
-                            if steady_duration >= SPEEDTEST_MIN_STEADY_DURATION:
-                                speed_bps = steady_bytes / steady_duration
-                                break
-
-                        if first_byte_time is not None and bytes_after_first >= SPEEDTEST_MIN_BYTES:
-                            transfer_duration = end_time - first_byte_time
-                            if transfer_duration > 0.05:
-                                speed_bps = bytes_after_first / transfer_duration
-                                break
-
-                    if speed_bps > 0 and allowed_countries and self.config.get("enable_loc_ranking", False):
-                        if loc_score == 0.0:
-                            fresh_score = await self.fetch_loc_score(base_port, allowed_countries, ipv4_ip, ipv6_ip)
-                            if fresh_score > 0:
-                                loc_score = fresh_score
-
-                        score_tag = f"LOC: {loc_score*100:.0f}%"
-                        parts = node.split("#", 1)
-                        if len(parts) == 2:
-                            unquoted = urllib.parse.unquote(parts[1])
-                            if re.search(r"LOC:\s*\d+%", unquoted):
-                                unquoted = re.sub(r"LOC:\s*\d+%", score_tag, unquoted)
-                            else:
-                                if " | " in unquoted:
-                                    n_parts = unquoted.split(" | ", 1)
-                                    unquoted = f"{n_parts[0]} | {score_tag} | {n_parts[1]}"
-                                else:
-                                    unquoted = f"{unquoted} | {score_tag}"
-                            node = f"{parts[0]}#{urllib.parse.quote(unquoted)}"
-                            node_name = get_node_name(node)
+                        t_end = t_last if not errored and t_last is not None else time.perf_counter()
+                        if t_steady is not None and steady_bytes >= SPEEDTEST_MIN_BYTES and t_end - t_steady >= SPEEDTEST_MIN_STEADY_DURATION:
+                            speed_bps = steady_bytes / (t_end - t_steady)
+                            break
+                        if t_first is not None and total_bytes >= SPEEDTEST_MIN_BYTES and t_end - t_first > 0.05:
+                            speed_bps = total_bytes / (t_end - t_first)
+                            break
 
                     if speed_bps == 0:
                         await runner.ensure_alive()
                         safe_print(f"[-] Speedtest {idx}/{self.total_nodes} [{node_name}] -> Speedtest failed (0 MB/s)")
                         return None
 
-                    speed_mbps = speed_bps / 1024 / 1024
-                    speed_tag = f"⚡ {speed_mbps:.1f} MB/s"
-                    parts = node.split("#", 1)
-                    if len(parts) == 2:
-                        orig_name = urllib.parse.unquote(parts[1])
-                        if " | ⚡ " in orig_name:
-                            new_name = re.sub(r" \|\s*⚡\s*[\d\.]+\s*MB/s", f" | {speed_tag}", orig_name)
-                        elif " | " in orig_name:
-                            n_parts = orig_name.split(" | ", 1)
-                            new_name = f"{n_parts[0]} | {speed_tag} | {n_parts[1]}"
+                    tag = f"⚡ {speed_bps / 1048576:.1f} MB/s"
+                    base, sep, frag = node.partition("#")
+                    if sep:
+                        orig = urllib.parse.unquote(frag)
+                        if " | ⚡ " in orig:
+                            label = re.sub(r" \|\s*⚡\s*[\d\.]+\s*MB/s", f" | {tag}", orig)
+                        elif " | " in orig:
+                            head, tail = orig.split(" | ", 1)
+                            label = f"{head} | {tag} | {tail}"
                         else:
-                            new_name = f"{orig_name} | {speed_tag}"
-                        node = f"{parts[0]}#{urllib.parse.quote(new_name)}"
+                            label = f"{orig} | {tag}"
                     else:
-                        node = f"{parts[0]}#{urllib.parse.quote(speed_tag)}"
-                    node_name = get_node_name(node)
-
-                    safe_print(f"[*] Speedtest {idx}/{self.total_nodes} -> {node_name}")
-                    return node, speed_bps, loc_score
+                        label = tag
+                    node = f"{base}#{urllib.parse.quote(label)}"
+                    safe_print(f"[*] Speedtest {idx}/{self.total_nodes} -> {label}")
+                    return node, speed_bps
         except CoreInstanceLost as lost:
             if lost.retry:
                 raise

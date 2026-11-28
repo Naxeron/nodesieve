@@ -1,206 +1,136 @@
-"""The command line: which action runs, with what, and which combinations are refused."""
+"""CLI argument parsing, overrides, config management, and rejected options."""
 
+import io
 import json
 import os
-import tempfile
-import unittest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from nodesieve.config import ConfigManager
 from nodesieve.constants import CONFIG_FILE
+from nodesieve.routing import normalize_routing
 from nodesieve.ui.cli import build_parser, main
 from nodesieve.ui.dashboard import VPNDashboard
 
 
-class TestCLI(unittest.TestCase):
-    def test_parser_defaults_to_a_scan(self):
-        args = build_parser().parse_args([])
-        self.assertEqual(args.action, "check")
-        self.assertFalse(args.dry_run)
-
-    def test_removed_actions_and_options_are_refused(self):
-        for argv in (["run"], ["--run"], ["--check"], ["install-router"], ["--router-host", "router.example"],
-                     ["--scan-every", "6"], ["--remove", "1"], ["--target", "steer"]):
-            with self.subTest(argv=argv), self.assertRaises(SystemExit) as exit_info:
-                build_parser().parse_args(argv)
-            self.assertEqual(exit_info.exception.code, 2)
-
-    def test_parser_config_overrides(self):
-        args = build_parser().parse_args([
-            "--workers", "64", "--tcp-workers", "256", "--countries", "US,GB,DE",
-            "--speedtest-timeout", "15",
-        ])
-        self.assertEqual((args.workers, args.tcp_workers, args.allowed_countries, args.speedtest_timeout),
-                         ("64", 256, "US,GB,DE", 15))
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_a_scan_runs_by_default_and_as_check(self, mock_pipeline):
-        mock_pipeline.return_value = True
-        for argv in ([], ["check"]):
-            with self.subTest(argv=argv):
-                mock_pipeline.reset_mock()
-                main(argv)
-                mock_pipeline.assert_awaited_once_with(dry_run=False)
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_dry_run_reaches_the_scan(self, mock_pipeline):
-        mock_pipeline.return_value = True
-        main(["check", "--dry-run"])
-        mock_pipeline.assert_awaited_once_with(dry_run=True)
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_a_failed_scan_exits_with_code_1(self, mock_pipeline):
-        mock_pipeline.return_value = False
-        with self.assertRaises(SystemExit) as cm:
-            main(["check"])
-        self.assertEqual(cm.exception.code, 1)
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_default_config_loads_and_saves_from_project_directory(self, mock_pipeline):
-        """Subscription edits use the canonical project config from any working directory."""
-        self.assertEqual(CONFIG_FILE, "nodesieve_config.json")
-        with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as caller_dir:
-            config_path = os.path.join(project_dir, "nodesieve_config.json")
-            with open(config_path, "w", encoding="utf-8") as config_file:
-                json.dump({"subscriptions": ["https://example.com/existing"], "workers": 7}, config_file)
-            previous_cwd = os.getcwd()
-            try:
-                os.chdir(caller_dir)
-                with patch("nodesieve.ui.cli.PROJECT_ROOT", project_dir):
-                    with self.assertRaises(SystemExit) as exit_result:
-                        main(["--add-sub", "https://example.com/new"])
-                self.assertEqual(exit_result.exception.code, 0)
-                self.assertFalse(os.path.exists("nodesieve_config.json"))
-            finally:
-                os.chdir(previous_cwd)
-
-            with open(config_path, encoding="utf-8") as config_file:
-                saved = json.load(config_file)
-            self.assertEqual(saved["subscriptions"], ["https://example.com/existing", "https://example.com/new"])
-            self.assertEqual(saved["workers"], 7)
-            mock_pipeline.assert_not_called()
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_add_sub_empty_string_exits_with_code_1_without_running_pipeline(self, mock_pipeline):
-        """Passing empty string to --add-sub logs error and exits with code 1 without running pipeline."""
-        with self.assertRaises(SystemExit) as cm:
-            main(["--add-sub", "   "])
-        self.assertEqual(cm.exception.code, 1)
-        mock_pipeline.assert_not_called()
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_add_sub_duplicate_handling(self, mock_pipeline):
-        """Adding already existing subscription exits cleanly without duplicating in config."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"subscriptions": ["https://example.com/sub1"]}, f)
-            cfg_path = f.name
-        try:
-            with self.assertRaises(SystemExit) as cm:
-                main(["--config-file", cfg_path, "--add-sub", "https://example.com/sub1"])
-            self.assertEqual(cm.exception.code, 0)
-            mock_pipeline.assert_not_called()
-            loaded = ConfigManager.load(cfg_path)
-            self.assertEqual(loaded["subscriptions"], ["https://example.com/sub1"])
-        finally:
-            if os.path.exists(cfg_path):
-                os.remove(cfg_path)
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_remove_sub_empty_or_nonexistent_exits_with_code_1(self, mock_pipeline):
-        """Removing non-existent subscription index or empty string exits with code 1."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"subscriptions": ["https://example.com/sub1"]}, f)
-            cfg_path = f.name
-        try:
-            with self.assertRaises(SystemExit) as cm:
-                main(["--config-file", cfg_path, "--remove-sub", ""])
-            self.assertEqual(cm.exception.code, 1)
-
-            with self.assertRaises(SystemExit) as cm:
-                main(["--config-file", cfg_path, "--remove-sub", "9999"])
-            self.assertEqual(cm.exception.code, 1)
-
-            with self.assertRaises(SystemExit) as cm:
-                main(["--config-file", cfg_path, "--remove-sub", "https://notfound.com/sub"])
-            self.assertEqual(cm.exception.code, 1)
-
-            mock_pipeline.assert_not_called()
-        finally:
-            if os.path.exists(cfg_path):
-                os.remove(cfg_path)
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_remove_sub_success_exits_with_code_0(self, mock_pipeline):
-        """Successfully removing subscription modifies config and exits with code 0."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"subscriptions": ["https://example.com/sub1", "https://example.com/sub2"]}, f)
-            cfg_path = f.name
-        try:
-            with self.assertRaises(SystemExit) as cm:
-                main(["--config-file", cfg_path, "--remove-sub", "1"])
-            self.assertEqual(cm.exception.code, 0)
-            mock_pipeline.assert_not_called()
-            loaded = ConfigManager.load(cfg_path)
-            self.assertEqual(loaded["subscriptions"], ["https://example.com/sub2"])
-        finally:
-            if os.path.exists(cfg_path):
-                os.remove(cfg_path)
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_conflicting_add_sub_and_remove_sub_exits_code_1(self, mock_pipeline):
-        """Specifying both --add-sub and --remove-sub exits with code 1."""
-        with self.assertRaises(SystemExit) as cm:
-            main(["--add-sub", "https://example.com/sub1", "--remove-sub", "1"])
-        self.assertEqual(cm.exception.code, 1)
-        mock_pipeline.assert_not_called()
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_dry_run_with_configuration_management_is_refused(self, mock_pipeline):
-        for cmd in (["--add-sub", "https://example.com/sub1", "--dry-run"], ["--remove-sub", "1", "--dry-run"],
-                    ["config", "--dry-run"], ["--show-config", "--dry-run"], ["serve", "--dry-run"]):
-            with self.subTest(cmd=cmd), self.assertRaises(SystemExit) as cm:
-                main(cmd)
-            self.assertEqual(cm.exception.code, 1)
-        mock_pipeline.assert_not_called()
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_numeric_arguments_input_validation(self, mock_pipeline):
-        """Zero, negative, or non-integer values for workers, tcp-workers, and timeout exit with code 1."""
-        for cmd in [
-            ["--workers", "0"],
-            ["--workers", "-5"],
-            ["--workers", "invalid_str"],
-            ["--tcp-workers", "0"],
-            ["--tcp-workers", "-10"],
-            ["--speedtest-timeout", "0"],
-            ["--speedtest-timeout", "-3"],
-            ["--min-speed-percent", "-1"],
-            ["--min-speed-percent", "101"],
-            ["--min-speed-percent", "nan"],
-        ]:
-            with self.assertRaises(SystemExit) as cm:
-                main(cmd)
-            self.assertEqual(cm.exception.code, 1, f"Failed on command: {cmd}")
-            mock_pipeline.assert_not_called()
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_option_values_are_not_read_as_actions(self, mock_pipeline):
-        mock_pipeline.return_value = True
-        for cmd in (["--output-dir", "check"], ["--output-dir", "serve"], ["-s", "https://example.com/sub/check"]):
-            with self.subTest(cmd=cmd):
-                mock_pipeline.reset_mock()
-                main(cmd)
-                mock_pipeline.assert_awaited_once_with(dry_run=False)
-
-    @patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock)
-    def test_cli_empty_subscription_flag_exits_code_1(self, mock_pipeline):
-        """Passing empty or whitespace-only subscription in -s exits with code 1."""
-        for empty_val in ["", "   "]:
-            with self.assertRaises(SystemExit) as cm:
-                main(["-s", empty_val])
-            self.assertEqual(cm.exception.code, 1)
-        mock_pipeline.assert_not_called()
+def _run_exit(argv):
+    with pytest.raises(SystemExit) as cm:
+        main(argv)
+    return cm.value.code
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_parser_defaults_and_overrides():
+    args = build_parser().parse_args([])
+    assert (args.action, args.dry_run) == ("check", False)
+
+    args = build_parser().parse_args([
+        "check", "--workers", "64", "--tcp-workers", "256", "--countries", "US,GB,DE",
+        "--speedtest-timeout", "15", "--rank-by", "location", "--output-dir", "out",
+    ])
+    assert (args.workers, args.tcp_workers, args.allowed_countries, args.speedtest_timeout,
+            args.rank_by, args.routing_output_dir) == ("64", 256, "US,GB,DE", 15, "location", "out")
+
+
+@pytest.mark.parametrize("argv", [
+    ["run"], ["--run"], ["--check"], ["install-router"], ["routing"], ["serve"],
+    ["--routing-setup"], ["--routing-show"], ["--router-host", "router.example"],
+    ["--scan-every", "6"], ["--remove", "1"], ["--target", "steer"],
+    ["--rank-by", "forkozz"], ["--core", "mihomo"], ["--feed-host", "0.0.0.0"], ["--feed-port", "9876"],
+])
+def test_removed_actions_and_options_are_refused(argv):
+    with pytest.raises(SystemExit) as cm:
+        build_parser().parse_args(argv)
+    assert cm.value.code == 2
+
+
+def test_scan_actions_dry_run_and_exit_code():
+    with patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock, return_value=True) as pipe:
+        for argv, dry in (([], False), (["check"], False), (["check", "--dry-run"], True),
+                          (["--output-dir", "check"], False), (["-s", "https://example.com/sub/check"], False)):
+            pipe.reset_mock()
+            main(argv)
+            pipe.assert_awaited_once_with(dry_run=dry)
+        pipe.return_value = False
+        assert _run_exit(["check"]) == 1
+
+
+def test_default_config_uses_project_directory_from_any_cwd(tmp_path, monkeypatch):
+    assert CONFIG_FILE == "nodesieve_config.json"
+    project_dir, caller_dir = tmp_path / "proj", tmp_path / "caller"
+    project_dir.mkdir()
+    caller_dir.mkdir()
+    cfg_path = project_dir / CONFIG_FILE
+    cfg_path.write_text(json.dumps({"subscriptions": ["https://example.com/existing"], "workers": 7}))
+    monkeypatch.chdir(caller_dir)
+    with patch("nodesieve.ui.cli.PROJECT_ROOT", str(project_dir)), \
+            patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock) as pipe:
+        assert _run_exit(["--add-sub", "https://example.com/new"]) == 0
+        pipe.assert_not_called()
+    assert not (caller_dir / CONFIG_FILE).exists()
+    saved = json.loads(cfg_path.read_text())
+    assert saved["subscriptions"] == ["https://example.com/existing", "https://example.com/new"]
+    assert saved["workers"] == 7
+
+
+def test_subscription_management_flags(tmp_path):
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps({"subscriptions": ["https://example.com/sub1", "https://example.com/sub2"]}))
+    with patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock) as pipe:
+        assert _run_exit(["--add-sub", "   "]) == 1
+        assert _run_exit(["--config-file", str(cfg), "--add-sub", "https://example.com/sub1"]) == 0
+        assert len(ConfigManager.load(str(cfg))["subscriptions"]) == 2
+        for bad in ("", "9999", "https://notfound.com/sub"):
+            assert _run_exit(["--config-file", str(cfg), "--remove-sub", bad]) == 1
+        assert _run_exit(["--config-file", str(cfg), "--remove-sub", "1"]) == 0
+        assert ConfigManager.load(str(cfg))["subscriptions"] == ["https://example.com/sub2"]
+        assert _run_exit(["--add-sub", "https://example.com/a", "--remove-sub", "1"]) == 1
+        pipe.assert_not_called()
+
+
+@pytest.mark.parametrize("cmd", [
+    ["--add-sub", "https://example.com/sub1", "--dry-run"],
+    ["--remove-sub", "1", "--dry-run"],
+    ["config", "--dry-run"],
+    ["--show-config", "--dry-run"],
+    ["--workers", "0"], ["--workers", "-5"], ["--workers", "invalid"],
+    ["--tcp-workers", "0"], ["--tcp-workers", "-10"],
+    ["--speedtest-timeout", "0"], ["--speedtest-timeout", "-3"],
+    ["--min-speed-percent", "-1"], ["--min-speed-percent", "101"], ["--min-speed-percent", "nan"],
+    ["-s", ""], ["-s", "   "],
+    ["config", "--output-dir", "  "], ["check", "--output-dir", "  "],
+])
+def test_invalid_cli_arguments_exit_code_1(cmd):
+    with patch.object(VPNDashboard, "run_pipeline_async", new_callable=AsyncMock) as pipe:
+        assert _run_exit(cmd) == 1
+        pipe.assert_not_called()
+
+
+def test_config_display_and_rank_by_overrides(tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    with patch("nodesieve.ui.cli.VPNDashboard") as dash, patch("sys.stdout", new_callable=io.StringIO) as out:
+        assert _run_exit(["--config-file", str(cfg), "config", "--rank-by", "location", "--output-dir", "example-output"]) == 0
+    dash.assert_not_called()
+    displayed = json.loads(out.getvalue())
+    assert displayed["routing"]["enabled"] is True
+    assert displayed["routing_output_dir"] == os.path.abspath("example-output")
+
+    routing = normalize_routing({"enabled": True})
+    cfg.write_text(json.dumps({"routing": routing}))
+    with patch("nodesieve.ui.cli.VPNDashboard") as dash:
+        dash.return_value.run_pipeline_async = AsyncMock(return_value=True)
+        main(["--config-file", str(cfg), "check", "--rank-by", "speed"])
+    assert dash.call_args.kwargs["config"]["routing"]["enabled"] is False
+    assert json.loads(cfg.read_text())["routing"]["enabled"] is True
+
+
+def test_unknown_routing_settings_refused_before_running(tmp_path):
+    cfg = tmp_path / "config.json"
+    for routing in ({"enabled": False, "main": {"mode": "preserve"}}, {"enabled": True, "services": {}},
+                    {"enabled": True, "target": "forkozz"}):
+        cfg.write_text(json.dumps({"routing": routing}))
+        for argv in (["config"], ["check", "--rank-by", "location"], ["check"]):
+            with patch("nodesieve.ui.cli.VPNDashboard") as dash:
+                assert _run_exit(["--config-file", str(cfg), *argv]) == 1
+                dash.assert_not_called()

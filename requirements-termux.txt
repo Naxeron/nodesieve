@@ -1,3 +1,2 @@
-# What nodesieve needs in Termux on Android, all of which pip installs there by itself.
+# What nodesieve needs in Termux on Android.
 aiohttp
-PyYAML

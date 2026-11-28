@@ -1,4 +1,4 @@
-# Local settings contain subscription links and the feed token
+# Local settings contain subscription links
 /nodesieve_config.json
 
 # Written by the checker; these hold proxy credentials
@@ -6,27 +6,20 @@
 /crashed_nodes.txt
 /sub_cache/
 /feed/
-# Written by tools/core_bench.py: node names and server addresses
-/core-bench/
 
-# Written by earlier versions, which a checkout may still hold: settings, router scripts
-# and AmneziaWG profiles, all with credentials
+# Legacy files from earlier versions (may hold credentials)
 /proxy_sites_config.json
 /apply_to_router.sh
 /forkozz-output/
 /*.conf
 
-# Core binaries, downloaded on first run
+# Core binary, downloaded on first run
 /xray
 /xray.exe
 /mihomo
 /mihomo.exe
 
-# Xray binary
-/xray
-/xray.exe
-
-# Local scratch: sample nodes and pre-refactoring backups
+# Local scratch
 /node.txt
 /test_node.yaml
 /test_config.yaml
