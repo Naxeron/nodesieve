@@ -137,7 +137,7 @@ class RoutingCLITests(unittest.TestCase):
         menu.assert_not_called()
 
     def test_routing_show_never_prompts_even_in_terminal_and_applies_overrides(self):
-        code, text, menu = self.invoke(["--routing-show", "--target", "steer", "--output-dir", "example-output"], tty=True)
+        code, text, menu = self.invoke(["--routing-show", "--rank-by", "location", "--output-dir", "example-output"], tty=True)
         self.assertEqual(code, 0)
         self.assertIn("Enabled: ON", text)
         self.assertIn(os.path.abspath("example-output"), text)
@@ -169,19 +169,19 @@ class RoutingCLITests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 menu.assert_not_called()
 
-    def test_config_display_receives_target_override(self):
-        code, text, _ = self.invoke(["config", "--target", "steer"])
+    def test_config_display_receives_rank_by_override(self):
+        code, text, _ = self.invoke(["config", "--rank-by", "location"])
         self.assertEqual(code, 0)
         self.assertTrue(json.loads(text)["routing"]["enabled"])
 
-    def test_target_mihomo_disables_previously_enabled_routing_for_pipeline(self):
+    def test_rank_by_speed_disables_previously_enabled_routing_for_pipeline(self):
         routing = normalize_routing(None)
         routing["enabled"] = True
         with open(self.config_file, "w", encoding="utf-8") as stream:
             json.dump({"routing": routing}, stream)
         with patch("nodesieve.ui.cli.VPNDashboard") as dashboard:
             dashboard.return_value.run_pipeline_async = AsyncMock(return_value=True)
-            main(["--config-file", self.config_file, "check", "--target", "mihomo"])
+            main(["--config-file", self.config_file, "check", "--rank-by", "speed"])
         self.assertFalse(dashboard.call_args.kwargs["config"]["routing"]["enabled"])
         with open(self.config_file, encoding="utf-8") as stream:
             self.assertTrue(json.load(stream)["routing"]["enabled"])
@@ -191,16 +191,16 @@ class RoutingCLITests(unittest.TestCase):
                         {"enabled": True, "target": "forkozz"}):
             with open(self.config_file, "w", encoding="utf-8") as stream:
                 json.dump({"routing": routing}, stream)
-            for args in (["--routing-show"], ["check", "--target", "steer"], ["check"]):
+            for args in (["--routing-show"], ["check", "--rank-by", "location"], ["check"]):
                 with self.subTest(routing=routing, args=args):
                     code, _, menu = self.invoke(args, tty=True)
                     self.assertEqual(code, 1)
                     menu.assert_not_called()
 
-    def test_parser_accepts_steer_target_and_rejects_ambiguous_editor_flags(self):
-        args = build_parser().parse_args(["check", "--target", "steer", "--output-dir", "out"])
-        self.assertEqual((args.target, args.routing_output_dir), ("steer", "out"))
-        for removed in (["--target", "forkozz"], ["--forkozz-config", "netshift.uci"], ["--routing-setup", "--routing-show"]):
+    def test_parser_accepts_rank_by_location_and_rejects_removed_or_ambiguous_flags(self):
+        args = build_parser().parse_args(["check", "--rank-by", "location", "--output-dir", "out"])
+        self.assertEqual((args.rank_by, args.routing_output_dir), ("location", "out"))
+        for removed in (["--target", "steer"], ["--rank-by", "forkozz"], ["--forkozz-config", "netshift.uci"], ["--routing-setup", "--routing-show"]):
             with self.subTest(removed=removed), self.assertRaises(SystemExit):
                 build_parser().parse_args(removed)
 

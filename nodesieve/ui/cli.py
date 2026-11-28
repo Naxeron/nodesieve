@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-speed-percent",
         type=float,
         metavar="PERCENT",
-        help="Minimum download speed as a percentage of the fastest node in this Mihomo-target scan "
+        help="Minimum download speed as a percentage of the fastest node in a speed-ranked scan "
              f"(0 to 100, default {DEFAULT_CONFIG['min_speed_percent']}). Use 0 to disable the cutoff.",
     )
     parser.add_argument(
@@ -103,12 +103,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to custom configuration file.",
     )
 
-    # Steer main-pool routing
+    # Scan ranking mode & location routing preferences
     parser.add_argument(
-        "--target",
-        choices=["mihomo", "steer"],
-        help="What a scan ranks by, for this run: 'steer' qualifies nodes by location consensus against "
-             "the routing.main policy, 'mihomo' by exit country and speed.",
+        "--rank-by",
+        dest="rank_by",
+        choices=["speed", "location"],
+        help="How a scan qualifies and ranks nodes, for this run: 'speed' (default) checks exit "
+             "country and download speed; 'location' verifies 16-provider GeoIP consensus against "
+             "the routing.main policy and skips speedtests.",
     )
     parser.add_argument(
         "--output-dir",
@@ -240,8 +242,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     except ValueError as exc:
         log.error(f"[-] Invalid routing configuration: {exc}")
         sys.exit(1)
-    if args.target is not None:
-        config["routing"]["enabled"] = args.target == "steer"
+    if args.rank_by is not None:
+        config["routing"]["enabled"] = args.rank_by == "location"
         config["routing"]["target"] = "steer"
         try:
             config["routing"] = normalize_routing(config["routing"])

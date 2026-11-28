@@ -422,7 +422,7 @@ def test_serve_creates_the_token_once_and_saves_nothing_else(tmp_path):
     path = settings_file(tmp_path)
     with patch("nodesieve.ui.cli.serve_feed", new_callable=AsyncMock) as served:
         assert run_cli("serve", "--config-file", str(path), "--feed-host", "0.0.0.0", "--feed-port", "8001",
-                       "--target", "steer") == 0
+                       "--rank-by", "location") == 0
     saved = json.loads(path.read_text())
     token = saved["feed_token"]
     assert re.fullmatch(r"[A-Za-z0-9_-]{24}", token)

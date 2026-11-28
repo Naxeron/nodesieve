@@ -20,7 +20,7 @@ class TestCLI(unittest.TestCase):
 
     def test_removed_actions_and_options_are_refused(self):
         for argv in (["run"], ["--run"], ["--check"], ["install-router"], ["--router-host", "router.example"],
-                     ["--scan-every", "6"], ["--remove", "1"]):
+                     ["--scan-every", "6"], ["--remove", "1"], ["--target", "steer"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit) as exit_info:
                 build_parser().parse_args(argv)
             self.assertEqual(exit_info.exception.code, 2)

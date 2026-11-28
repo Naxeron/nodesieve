@@ -78,14 +78,14 @@ DNS automatically uses Android's resolver, and concurrency is capped at 64 nodes
 3. **Exit IP & country check** — tests nodes in batches of up to 32 per local core instance (`--core xray` default, or `--core mihomo`), dropping dead nodes and real-IP leaks.
 4. **Rank & publish** — writes the feed atomically; if a scan finds nothing, the previous feed stays untouched.
 
-### Scan targets
+### Ranking mode (`--rank-by`)
 
-Both targets publish the same `links.txt` feed (usable by Steer or any VPN app):
+Both modes publish the same `links.txt` feed (usable by Steer or any VPN app):
 
-| Target | How it qualifies & ranks | Notes |
+| Mode | How it qualifies & ranks | Notes |
 |---|---|---|
-| `mihomo` *(default)* | Cloudflare exit country (blocks `RU, BY, CN, IR, KP, SY, CU`; optional `--countries`), then **sequential speedtest** | Keeps up to 30 nodes ≥ `min_speed_percent` (default `50%`) of fastest. Downloads up to 100 MB per working node. |
-| `steer` (`--target steer` or `python -m nodesieve routing`) | **16-provider GeoIP consensus** per IP family; skips speedtest | Requires ≥60% country agreement and ≥3 votes per IP family outside excluded countries (configured under `routing.main`, see [examples/steer-routing.json](examples/steer-routing.json)). Keeps all qualifying nodes ranked by agreement, votes, and latency; writes a redacted report to `steer-output/routing-report.json`. |
+| `--rank-by speed` *(default)* | Cloudflare exit country (blocks `RU, BY, CN, IR, KP, SY, CU`; optional `--countries`), then **sequential speedtest** | Keeps up to 30 nodes ≥ `min_speed_percent` (default `50%`) of fastest. Downloads up to 100 MB per working node. |
+| `--rank-by location` *(or enable via `python -m nodesieve routing`)* | **16-provider GeoIP consensus** per IP family; skips speedtest | Requires ≥60% country agreement and ≥3 votes per IP family outside excluded countries (configured under `routing.main`, see [examples/steer-routing.json](examples/steer-routing.json)). Keeps all qualifying nodes ranked by agreement, votes, and latency; writes a redacted report to `steer-output/routing-report.json`. |
 
 ## Subscription feed & settings
 
